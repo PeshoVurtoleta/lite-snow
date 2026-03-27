@@ -1,0 +1,53 @@
+# @zakkster/lite-snow
+
+> Zero-GC SoA environmental snow engine. Drift physics, Z-depth parallax, ellipse accumulation, bucketed rendering. One dependency.
+
+## Install
+npm i @zakkster/lite-snow
+
+## Dependencies
+@zakkster/lite-color (OKLCH → CSS string conversion)
+
+## Import
+import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
+
+## Key Facts
+- 12 SoA arrays: x, y, z, gz, wz, bucket, radius, driftPhase, driftSpeed, driftAmp, life, state
+- Precomputed per-flake: gz[]=gravity*z, wz[]=wind*z, radius[]=base*z, driftAmp[]=amp*z, bucket[]
+- Two-phase lifecycle: flake(state=1) drifts down → settles → melt(state=2) as flat ellipse
+- Sinusoidal drift: per-flake random phase + speed + depth-scaled amplitude
+- Z-depth parallax (0.2–1.0): all physics/render params scale by depth
+- 3 render buckets: one ctx.fill() per depth tier — batched drawing
+- Melt phase: ellipse (2.5× wider, 0.5× tall) with life-ratio alpha fade
+- Dimension cache: _areaModifier recomputed only on canvas size change
+- Off-screen culling: X ± 200px and Y < -200 (wind + negative gravity leak)
+- Responsive density: spawn count scales with canvas area
+- 3 presets: SNOW_PRESETS.flurry, .heavy, .blizzard
+- No clearRect — snow is overlay. Caller clears.
+- spawn() and updateAndDraw() separate — caller controls timing
+- Pre-parsed OKLCH color in constructor
+- RNG injectable, no lite-random dep
+- destroy() nulls 12 arrays
+
+## API
+- new SnowEngine(maxParticles?, config?)
+- .spawn(dt, w, h) — spawn new flakes
+- .updateAndDraw(ctx, dt, w, h) — physics + render
+- .clear() — kill all
+- .destroy() — release arrays
+
+## Config
+gravity (40), wind (30), density (10), baseRadius (2.5), driftAmplitude (15),
+driftFreq (1.0), meltTimeMin (2.0), meltTimeMax (5.0),
+color ('oklch(0.98 0.02 250)'), rng (Math.random)
+
+## Presets
+SNOW_PRESETS.flurry — gentle
+SNOW_PRESETS.heavy — dense, windy
+SNOW_PRESETS.blizzard — extreme wind + density
+
+## Game Loop
+snow.spawn(dt, w, h);
+ctx.clearRect(0, 0, w, h);       // caller clears
+drawScene();                       // caller scene
+snow.updateAndDraw(ctx, dt, w, h); // snow overlays
