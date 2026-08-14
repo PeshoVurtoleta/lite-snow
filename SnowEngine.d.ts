@@ -43,6 +43,19 @@ export declare class SnowEngine {
     life: Float32Array | null;
     state: Uint8Array | null;
 
+    /** Simulation clock in seconds, advanced by updateAndDraw(). @internal */
+    _elapsedTime: number;
+    /** Set by destroy(); every method is a no-op once true. @internal */
+    _destroyed: boolean;
+    /** Cached canvas width; guards _areaModifier recompute. @internal */
+    _lastW: number;
+    /** Cached canvas height; guards _areaModifier recompute. @internal */
+    _lastH: number;
+    /** (w * h) / 100000, recomputed only on dimension change. @internal */
+    _areaModifier: number;
+    /** Three depth-tier render descriptors { id, zAvg }. @internal */
+    _buckets: Array<{ id: number; zAvg: number }>;
+
     constructor(maxParticles?: number, config?: SnowConfig);
 
     /**
@@ -64,6 +77,9 @@ export declare class SnowEngine {
     /** Release all typed arrays. Idempotent. */
     destroy(): void;
 }
+
+/** Package version. Kept in sync with package.json and llms.txt. */
+export declare const VERSION: string;
 
 export declare const SNOW_PRESETS: {
     /** Gentle snowfall. density: 10, wind: 30, gravity: 40 */

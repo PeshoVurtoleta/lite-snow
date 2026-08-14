@@ -1,10 +1,12 @@
 /**
- * @zakkster/lite-snow v1.0.0
+ * @zakkster/lite-snow v1.0.1
  * Zero-GC, SoA Environmental Snow Engine
  * Drift physics, Z-depth parallax, ellipse accumulation, bucketed rendering, 3 presets.
  */
 
 import { toCssOklch } from '@zakkster/lite-color';
+
+export const VERSION = '1.0.1';
 
 const TAU = Math.PI * 2;
 
