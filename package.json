@@ -1,0 +1,71 @@
+{
+  "name": "@zakkster/lite-snow",
+  "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
+  "version": "1.0.0",
+  "description": "Zero-GC, SoA environmental snow engine with drift physics, Z-depth parallax, ellipse-based accumulation, dimension caching, and off-screen culling. Designed for cinematic snowfall with high-performance rendering and natural flake behavior.",
+  "type": "module",
+  "main": "./SnowEngine.js",
+  "module": "./SnowEngine.js",
+  "types": "./SnowEngine.d.ts",
+  "exports": {
+    ".": {
+      "types": "./SnowEngine.d.ts",
+      "node": "./SnowEngine.js",
+      "import": "./SnowEngine.js",
+      "default": "./SnowEngine.js"
+    }
+  },
+  "files": [
+    "SnowEngine.js",
+    "SnowEngine.d.ts",
+    "llms.txt",
+    "README.md"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/PeshoVurtoleta/lite-snow#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/PeshoVurtoleta/lite-snow.git"
+  },
+  "bugs": {
+    "url": "https://github.com/PeshoVurtoleta/lite-snow/issues",
+    "email": "shinikchiev@yahoo.com"
+  },
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/PeshoVurtoleta"
+  },
+  "dependencies": {
+    "@zakkster/lite-color": "^2.1.0"
+  },
+  "keywords": [
+    "snow",
+    "snowfall",
+    "weather",
+    "environment",
+    "particle-engine",
+    "particle-system",
+    "canvas",
+    "2d",
+    "webgl",
+    "oklch",
+    "zero-gc",
+    "soa",
+    "drift",
+    "accumulation",
+    "z-depth",
+    "parallax",
+    "micro-vfx",
+    "vfx",
+    "javascript",
+    "typescript",
+    "zakkster",
+    "lite-engine"
+  ],
+  "devDependencies": {
+    "vitest": "^3.0.0"
+  },
+  "scripts": {
+    "test": "vitest run"
+  }
+}

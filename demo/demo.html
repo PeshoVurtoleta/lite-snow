@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>lite-snow Pro Environment</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #0d111a;
+            font-family: system-ui, sans-serif;
+            color: #fff;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        #panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            width: 320px;
+            background: rgba(20, 25, 35, 0.7);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            padding: 20px;
+            border-radius: 16px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6);
+        }
+
+        h2 {
+            margin: 0 0 15px 0;
+            font-size: 16px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #aaccff;
+        }
+
+        .control-group {
+            margin-bottom: 16px;
+        }
+
+        label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            margin-bottom: 6px;
+            font-weight: 600;
+            color: #ddee11;
+        }
+
+        label {
+            color: #d0e0ff;
+        }
+
+        input[type=range] {
+            width: 100%;
+            margin-bottom: 5px;
+            accent-color: #ffffff;
+        }
+
+        .presets {
+            display: flex;
+            gap: 8px;
+            margin-top: 24px;
+        }
+
+        button {
+            flex: 1;
+            background: #1c2638;
+            color: #aaccff;
+            border: 1px solid #30405a;
+            padding: 10px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 700;
+            transition: 0.2s;
+        }
+
+        button:hover {
+            background: #30405a;
+            color: #fff;
+        }
+
+        button.active {
+            background: #ffffff;
+            color: #0d111a;
+            border-color: #ffffff;
+            box-shadow: 0 0 15px rgba(255, 255, 255, 0.4);
+        }
+    </style>
+</head>
+<body>
+
+<div id="panel">
+    <h2>Winter Simulation</h2>
+
+    <div class="control-group">
+        <label>Density (Flakes/Area) <span id="denVal">10.0</span></label>
+        <input type="range" id="density" min="2" max="40" step="2" value="10">
+    </div>
+
+    <div class="control-group">
+        <label>Wind Velocity <span id="windVal">30</span></label>
+        <input type="range" id="wind" min="-500" max="500" step="10" value="30">
+    </div>
+
+    <div class="control-group">
+        <label>Gravity (Fall Speed) <span id="gravVal">40</span></label>
+        <input type="range" id="gravity" min="10" max="500" step="10" value="40">
+    </div>
+
+    <div class="presets">
+        <button id="btnFlurry" class="active">Flurry</button>
+        <button id="btnHeavy">Heavy</button>
+        <button id="btnBlizzard">Blizzard</button>
+    </div>
+</div>
+
+<canvas id="stage"></canvas>
+
+<script type="module">
+    // --- INLINED CORE ENGINE ---
+    const TAU = Math.PI * 2;
+
+    import {SnowEngine} from 'https://esm.run/@zakkster/lite-snow@1.0.0';
+
+    // --- APP WIRING ---
+    const canvas = document.getElementById('stage');
+    const ctx = canvas.getContext('2d', {alpha: false});
+    const engine = new SnowEngine();
+
+    let w = 0, h = 0;
+    const dpr = window.devicePixelRatio || 1;
+
+    function updateSize() {
+        w = window.innerWidth;
+        h = window.innerHeight;
+        canvas.width = w * dpr;
+        canvas.height = h * dpr;
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+    }
+
+    window.addEventListener('resize', updateSize);
+    updateSize();
+
+    // UI Controls
+    const dom = {
+        den: document.getElementById('density'), denVal: document.getElementById('denVal'),
+        wind: document.getElementById('wind'), windVal: document.getElementById('windVal'),
+        grav: document.getElementById('gravity'), gravVal: document.getElementById('gravVal'),
+        btns: [document.getElementById('btnFlurry'), document.getElementById('btnHeavy'), document.getElementById('btnBlizzard')]
+    };
+
+    function updateUI() {
+        dom.denVal.innerText = dom.den.value + '.0';
+        dom.windVal.innerText = dom.wind.value;
+        dom.gravVal.innerText = dom.grav.value;
+        engine.config.density = parseFloat(dom.den.value);
+        engine.config.wind = parseFloat(dom.wind.value);
+        engine.config.gravity = parseFloat(dom.grav.value);
+    }
+
+    [dom.den, dom.wind, dom.grav].forEach(el => el.addEventListener('input', updateUI));
+
+    function switchPreset(btn, den, wind, grav, driftAmp) {
+        dom.btns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        dom.den.value = den;
+        dom.wind.value = wind;
+        dom.grav.value = grav;
+        engine.config.driftAmplitude = driftAmp;
+        updateUI();
+    }
+
+    document.getElementById('btnFlurry').onclick = (e) => switchPreset(e.target, 10, 30, 40, 15);
+    document.getElementById('btnHeavy').onclick = (e) => switchPreset(e.target, 24, 150, 80, 25);
+    document.getElementById('btnBlizzard').onclick = (e) => switchPreset(e.target, 40, 400, 250, 50);
+
+    // Loop
+    let lastTime = performance.now();
+
+    function loop(time) {
+        const dt = Math.min((time - lastTime) / 1000, 0.1);
+        lastTime = time;
+
+        ctx.fillStyle = '#0d111a';
+        ctx.fillRect(0, 0, w, h);
+
+        engine.spawn(dt, w, h);
+        engine.updateAndDraw(ctx, dt, w, h);
+
+        requestAnimationFrame(loop);
+    }
+
+    requestAnimationFrame(loop);
+</script>
+</body>
+</html>
