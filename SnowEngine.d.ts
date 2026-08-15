@@ -60,8 +60,18 @@ export declare class SnowEngine {
     _lastH: number;
     /** (w * h) / 100000, recomputed only on dimension change. @internal */
     _areaModifier: number;
-    /** Three depth-tier render descriptors { id, zAvg }. @internal */
-    _buckets: Array<{ id: number; zAvg: number }>;
+    /** Ring-cursor spawn probe position; wraps at max. @internal */
+    _spawnCursor: number;
+    /** Render index bin for depth bucket 0 (near). Preallocated Uint32Array(max). @internal */
+    _bin0: Uint32Array | null;
+    /** Render index bin for depth bucket 1 (mid). Preallocated Uint32Array(max). @internal */
+    _bin1: Uint32Array | null;
+    /** Render index bin for depth bucket 2 (far). Preallocated Uint32Array(max). @internal */
+    _bin2: Uint32Array | null;
+    /** Render bin of packed settled/melting slots (index | band<<24). @internal */
+    _binMelt: Uint32Array | null;
+    /** Per-melt-band populate flags (Uint32Array(8)). @internal */
+    _meltAlphaCount: Uint32Array | null;
 
     /**
      * @throws {RangeError} if maxParticles is not an integer in 1..10000000, or
@@ -103,8 +113,9 @@ export declare class SnowEngine {
     clear(): void;
 
     /**
-     * Release all typed arrays and the config, colorStr and _buckets references.
-     * Runs clear() first, so the clock and counters are zeroed. Idempotent.
+     * Release all typed arrays -- the twelve SoA columns and the five render
+     * bins -- and the config and colorStr references. Runs clear() first, so the
+     * clock and counters are zeroed. Idempotent.
      */
     destroy(): void;
 }

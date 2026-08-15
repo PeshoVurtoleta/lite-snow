@@ -3,6 +3,100 @@
 All notable changes to `@zakkster/lite-snow` are documented here. The format
 follows Keep a Changelog, and the project adheres to Semantic Versioning.
 
+## [1.1.0] - 2026-08-15
+
+Session S3, the headline render session. Six findings, one root cause: the frame
+did four full-pool scans and then threw away the batching those scans exist to
+enable. The README promised "3 draw calls for all 10,000 flakes" while the melt
+loop issued a `beginPath` + `ellipse` + `fill` **per melting particle**. This
+session makes the render bin-driven and the performance claim true.
+
+### Fixed
+
+- **SN-06 -- the melt pass is batched.** It used to issue one
+  `beginPath`/`ellipse`/`fill` per melting particle, so the true draw-call count
+  was `3 + meltCount`, not 3. Melting particles are now quantized into at most 8
+  alpha bands and drawn in one `fill()` per populated band. Draw calls per frame
+  are now exactly `3 + populatedMeltBands`, bounded at `3 + 8` and independent of
+  the melt population. The visible cost is that the melt fade now bands into 8
+  steps instead of being continuous; at 8 bands it is not perceptible in motion.
+- **SN-13 / SN-11 -- one full-pool scan per frame, down from five.** The render
+  used to scan all `max` slots four times (three depth-bucket passes plus the
+  melt pass) on top of the physics pass -- five full scans, most of them over
+  free slots. The bin push is now folded into the physics pass: as each live
+  slot's final state is computed it is written into one of four preallocated
+  `Uint32Array(max)` index lists (three depth buckets plus melt), and the render
+  iterates only those live indices. The `for...of` over three object literals
+  (`_buckets`) in the hot body is gone; the three bucket alphas are module
+  constants.
+- **SN-12 -- spawn uses a ring cursor.** The old spawn scanned for a free slot
+  from index 0 on every call, so under steady snowfall it walked thousands of
+  live slots per spawn. A persistent `_spawnCursor` now wraps, and a full wrap
+  that finds no free slot fails closed (it stops -- it never spins). `clear()`
+  resets the cursor so a cleared engine reproduces a fresh one bit-for-bit.
+- **SN-14 -- loop-invariant loads are hoisted.** Config reads (`rng`, `gravity`,
+  `wind`, `baseRadius`, `driftAmplitude`, `driftFreq`, `meltTimeMin/Max`) and the
+  twelve SoA column references are read once into locals above both loops instead
+  of being re-resolved per iteration.
+- **SN-08 -- melt puddles follow a resize.** A melting particle's `y` is now
+  clamped to the current height in the melt branch only, so after the canvas
+  shrinks the puddles stay on-screen instead of rendering below the floor.
+
+### Changed
+
+- Render is bin-driven; `_buckets` and its iterator are removed. No public API,
+  signature, or SoA-column change -- `spawn()` and `updateAndDraw()` keep their
+  exact shapes (the update/draw split remains S9).
+- **The README render claim is corrected** from "3 draw calls for all 10,000
+  flakes" to "3 depth-bucket fills plus up to 8 melt-band fills".
+- **Bytes per particle: 42 -> 58.** The four `Uint32Array(max)` bin lists add 16
+  bytes per slot. They are allocated once at construction; T6 pins each bin's
+  `.buffer.byteLength` constant across a 60000-frame window, so binning is never
+  a per-frame allocation. The per-frame reset is four scalar writes plus eight
+  band-flag writes -- never a `.fill()` or a realloc.
+
+### Performance
+
+Frame cost (`updateAndDraw` at a pinned occupancy, 2000-slot pool, non-settling
+flakes so occupancy holds) measured interleaved in alternating pairs on an
+**Apple M4 Pro (arm64), Node v26.3.1**. Median of 41 trials x 100-frame batches,
+500-frame warmup; two full runs agreed within a few points. Block-ordering was
+avoided deliberately -- it measures thermal drift, not the diff.
+
+| Occupancy | v1.0.3 | v1.1.0 | Delta |
+| --- | --- | --- | --- |
+| 20% | ~9.4 us | ~6.2 us | **-34%** |
+| 60% | ~18.4 us | ~13.6 us | **-26%** |
+| 95% | ~26.2 us | ~19.6 us | **-25%** |
+
+No regression at any occupancy. The win is largest at low occupancy because the
+old render scanned the full pool regardless of how many slots were live; the
+bin-driven render touches only live indices.
+
+### Tests
+
+- **T5 differential fuzz** (new): a plain-object AoS oracle driven by the same
+  seeded rng and frame schedule; sorted `(x, y, radius, state)` tuples must match
+  the SoA engine exactly over 100000 mixed spawn/update/clear/resize frames. This
+  is the safety net for the hot-path rewrite -- a rewrite changes cost, never
+  answers. T9 control 2 corrupts the oracle to prove the comparator can fail.
+- **T3 adversarial** (new): resize churn including `1x1` and `8000x8000` and a
+  shrink with a full melt population live (SN-08), density ramp `0 -> 40 -> 0`,
+  wind sign flips, gravity flipped negative mid-run, call-order abuse, and
+  run-to-saturation.
+- **T2** gains a draw-completeness contract -- every falling flake emits exactly
+  one `arc()` and every melter exactly one `ellipse()`, so a dropped bin push is
+  caught (the fill count alone cannot see it) -- and a band-reset contract that
+  drives a top alpha band from populated to empty and checks the per-band flags
+  follow a fresh recount, catching a stuck band.
+- **T6** pins the four bin backing-store byte lengths; **T9** adds the melt-batch
+  and oracle controls (control 5 both directions: unbatched melt fails the
+  fill-count ceiling, a batched no-melt scene still passes).
+- Gates proven non-decorative by both law-7 detectors: an 8-mutation matrix over
+  the S3 guards (7 caught; the 1 survivor is the ring cursor's finite termination
+  bound, whose value cannot change spawn output -- benign, documented) and a
+  fired-site census (110 sites, 109 fired, the 1 miss a comment).
+
 ## [1.0.3] - 2026-08-15
 
 Session S2. S1 shut the per-frame door; this shuts the per-object one --
@@ -319,6 +413,7 @@ non-fatal known-issue reproductions so they are visible on every run.
   Repro: `e.spawn(0.016,800,600); e.updateAndDraw(ctx,-1,800,600)` ->
   `e._elapsedTime` is negative and the live count drops.
 
+[1.1.0]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.1.0
 [1.0.3]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.0.3
 [1.0.2]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.0.2
 [1.0.1]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.0.1

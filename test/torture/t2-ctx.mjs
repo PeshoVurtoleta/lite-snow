@@ -56,6 +56,47 @@ function meltingCount(e) {
     return n;
 }
 
+/**
+ * The distinct melt alpha bands (and raw melter count) a render pass would see
+ * for the CURRENT pool state. Uses the engine's own quantization so the S3
+ * fill-count contract (fill count === 3 buckets + populated melt bands) is
+ * checked against the same rule the engine renders by. O(max) -- test only.
+ */
+function meltBins(e) {
+    const invMeltMax = 1 / e.config.meltTimeMax;
+    const seen = [0, 0, 0, 0, 0, 0, 0, 0];
+    let used = 0, melt = 0;
+    for (let i = 0; i < e.max; i++) {
+        if (e.state[i] !== 2) continue;
+        melt++;
+        let b = (e.life[i] * invMeltMax * e.z[i] * 8) | 0;
+        if (b < 0) b = 0; else if (b > 7) b = 7;
+        if (seen[b] === 0) { seen[b] = 1; used++; }
+    }
+    return { used, melt };
+}
+
+/**
+ * The per-band occupancy a correct render sees for the CURRENT pool: p[b] is 1
+ * iff some melter quantizes into band b. The engine's _meltAlphaCount must equal
+ * this after EVERY frame -- it is zeroed each frame and re-set only for bands a
+ * current melter lands in. A dropped per-band reset leaves a stuck flag, which
+ * costs a phantom empty beginPath/fill on a later frame -- invisible to the
+ * single-frame fill-count row, which never drives a band from populated to
+ * empty. Uses the engine's own quantization. O(max) -- test only.
+ */
+function bandPresence(e) {
+    const invMeltMax = 1 / e.config.meltTimeMax;
+    const p = [0, 0, 0, 0, 0, 0, 0, 0];
+    for (let i = 0; i < e.max; i++) {
+        if (e.state[i] !== 2) continue;
+        let b = (e.life[i] * invMeltMax * e.z[i] * 8) | 0;
+        if (b < 0) b = 0; else if (b > 7) b = 7;
+        p[b] = 1;
+    }
+    return p;
+}
+
 function approxEq(a, b) { return Math.abs(a - b) < 1e-9; }
 
 export function run() {
@@ -82,6 +123,98 @@ export function run() {
         check(ctx.nClearRect === 0 && ctx.nSave === 0 && ctx.nRestore === 0 &&
               ctx.nSetTransform === 0 && ctx.nScale === 0,
             () => `T2 row 6: forbidden call made -- clearRect=${ctx.nClearRect} save=${ctx.nSave} restore=${ctx.nRestore} setTransform=${ctx.nSetTransform} scale=${ctx.nScale}`);
+        // S3 fill-count contract on a zero-melt frame: exactly 3 depth-bucket
+        // fills and no melt-band fill. The bucket fills are unconditional (an
+        // empty bucket still opens and closes its path), so this is 3 even when
+        // a bucket is empty -- but the fixture has all three populated.
+        const mb0 = meltBins(e);
+        check(mb0.melt === 0,
+            () => `T2 fill-count: fixture is not zero-melt (${mb0.melt} melters)`);
+        check(ctx.nFill === 3,
+            () => `T2 fill-count: ${ctx.nFill} fills on a zero-melt frame (want 3 = 3 buckets + 0 melt bands)`);
+        // Draw-COMPLETENESS, not just fill-count. The bucket fills are
+        // unconditional, so nFill cannot see a dropped bin push -- an unpushed
+        // bucket renders zero arcs but still opens and closes its path. Count the
+        // PRIMITIVES: every falling flake must emit exactly one arc(), none an
+        // ellipse(). A dropped push in ANY bucket shows here as an arc shortfall.
+        const fc = bucketCounts(e);
+        check(ctx.nArc === fc[0] + fc[1] + fc[2],
+            () => `T2 draw-completeness: ${ctx.nArc} arc() calls != ${fc[0] + fc[1] + fc[2]} falling flakes -- a bucket push was dropped`);
+        check(ctx.nEllipse === 0,
+            () => `T2 draw-completeness: ${ctx.nEllipse} ellipse() calls on a zero-melt frame (want 0)`);
+    }
+
+    // S3 fill-count contract on a MELT scene: fill count is EXACTLY
+    // 3 + meltBinsUsed and never exceeds 3 + 8. This is the assertion the pre-S3
+    // one-fill-per-melter render fails (T9 control 5 proves both directions). We
+    // force many melters so the batch actually collapses a large population into
+    // <= 8 bands -- otherwise the bound would be vacuous.
+    {
+        const e = new SnowEngine(300, {
+            gravity: 8000, wind: 0, density: 300,
+            meltTimeMin: 4.0, meltTimeMax: 8.0, // long life -> melters persist
+            rng: makeRng(SEED ^ 0x13572468),
+        });
+        for (let f = 0; f < 12; f++) { e.spawn(DT, W, H); e.updateAndDraw(makeMockCtx(), DT, W, H); }
+        const ctx = makeMockCtx();
+        e.updateAndDraw(ctx, DT, W, H);
+        const mb = meltBins(e);
+        check(mb.melt > 8,
+            () => `T2 melt fill-count: only ${mb.melt} melters -- batch bound would be vacuous`);
+        check(ctx.nFill === 3 + mb.used,
+            () => `T2 melt fill-count: ${ctx.nFill} fills != 3 + ${mb.used} melt bands (${mb.melt} melters batched)`);
+        check(ctx.nFill <= 3 + 8,
+            () => `T2 melt fill-count: ${ctx.nFill} fills exceeds the 3 + 8 ceiling`);
+        // Draw-completeness on a MELT scene: every falling flake one arc(), every
+        // melter one ellipse(). Batching collapses the FILLS to <= 8 bands, but the
+        // primitive count still equals the live population -- a dropped bucket or
+        // melt push shows as a shortfall the fill-count row cannot.
+        const fcm = bucketCounts(e);
+        check(ctx.nArc === fcm[0] + fcm[1] + fcm[2],
+            () => `T2 draw-completeness: ${ctx.nArc} arc() calls != ${fcm[0] + fcm[1] + fcm[2]} falling flakes`);
+        check(ctx.nEllipse === mb.melt,
+            () => `T2 draw-completeness: ${ctx.nEllipse} ellipse() calls != ${mb.melt} melters`);
+    }
+
+    // SN-06 per-band reset. _meltAlphaCount must reflect ONLY the current frame's
+    // occupied bands. A dropped per-band reset survives the single-frame fill-count
+    // row because that row never drives a band from populated to empty -- so drive
+    // exactly that: settle a high-z population into the top band, then let life
+    // decay so those melters fall to a lower band and the top band vacates. The
+    // band flags must follow a fresh recount every frame; a stuck flag is caught
+    // the first frame its band is recomputed empty.
+    {
+        const DRAIN_DT = 0.05;
+        const e = new SnowEngine(400, {
+            gravity: 80000, wind: 0, density: 400,
+            // range 0 -> life == meltTimeMax at settle, so alpha == z: high-z
+            // flakes land in the top bands and then descend as life decays.
+            meltTimeMin: 5.0, meltTimeMax: 5.0,
+            rng: makeRng(SEED ^ 0x0badf00d),
+        });
+        e.spawn(DT, W, H);
+        // Settle the pool -- a few frames carry every depth from the spawn line
+        // (y ~ -100) past the floor (h). No re-spawn: the melt population only ages.
+        for (let f = 0; f < 4; f++) e.updateAndDraw(makeMockCtx(), DT, W, H);
+
+        // Non-vacuity: the top band must actually be occupied now, else a dropped
+        // top-band reset could never be exercised by this fixture.
+        const p0 = bandPresence(e);
+        check(p0[7] === 1,
+            () => `T2 band-reset: top band unoccupied after settle -- fixture is vacuous (bands ${p0.join('')})`);
+
+        let sawVacate = false;
+        for (let f = 0; f < 60 && e.meltingCount > 0; f++) {
+            e.updateAndDraw(makeMockCtx(), DRAIN_DT, W, H);
+            const want = bandPresence(e);
+            if (want[7] === 0) sawVacate = true;
+            for (let b = 0; b < 8; b++) {
+                check(e._meltAlphaCount[b] === want[b],
+                    () => `T2 band-reset: _meltAlphaCount[${b}]=${e._meltAlphaCount[b]} != recount ${want[b]} at drain frame ${f} (want bands ${want.join('')})`);
+            }
+        }
+        check(sawVacate,
+            () => `T2 band-reset: band 7 never vacated across the drain -- stuck-flag path unexercised`);
     }
 
     // Row 2 -- a draw call throws mid-render; alpha is restored and rethrown.

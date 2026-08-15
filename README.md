@@ -123,7 +123,12 @@ Flakes are binned into 3 depth tiers at spawn:
 | 1 (mid) | 0.4-0.7 | 0.44 | ~0.55× |
 | 2 (near) | 0.7-1.0 | 0.72 | ~0.9× |
 
-Each bucket renders in **one batched `ctx.fill()` call** -- 3 draw calls for all 10,000 flakes.
+Each depth bucket renders in **one batched `ctx.fill()` call**. Melting flakes are
+quantized into at most 8 alpha bands, each drawn in a single `fill()` -- so a full
+frame is **3 depth-bucket fills plus up to 8 melt-band fills** (`3 + 8` worst case),
+independent of how many flakes are on screen. The physics pass bins every live
+flake into preallocated index lists in one sweep, so the render touches only live
+slots, never the whole pool.
 
 ---
 
@@ -340,10 +345,13 @@ Both are validated at construction and throw a `RangeError` naming the value:
 | `maxParticles` | integer, `1 <= n <= 10000000` |
 | `baseRadius` | finite, `> 0` |
 
-**Sizing.** The pool costs **42 bytes per particle** -- ten `Float32Array`
-columns at 4 bytes plus two `Uint8Array` columns at 1 byte. The default 10000
-slots are 420 KB; the 10000000 ceiling is 420 MB. The ceiling exists so a typo
-fails loudly instead of attempting a multi-gigabyte allocation.
+**Sizing.** The pool costs **58 bytes per particle** -- ten `Float32Array`
+columns at 4 bytes plus two `Uint8Array` columns at 1 byte (42 bytes of SoA
+state), plus four `Uint32Array` render-bin index lists at 4 bytes each (16 bytes).
+The default 10000 slots are 580 KB; the 10000000 ceiling is 580 MB. The ceiling
+exists so a typo fails loudly instead of attempting a multi-gigabyte allocation.
+The bin lists are allocated once at construction and rebuilt in place each frame,
+never reallocated.
 
 ### Methods
 

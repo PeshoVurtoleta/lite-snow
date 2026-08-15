@@ -9,8 +9,11 @@
  * requires `stabilize:'deep'`, which `runOpsGate` supplies.
  *
  * A heap gate cannot substitute for a direct structural assertion either, so we
- * also pin every SoA backing store's byteLength and `_buckets.length` across the
- * window: nothing may grow.
+ * also pin every SoA backing store's byteLength AND the four render-bin backing
+ * stores' byteLength across the window: nothing may grow. The bins are the S3
+ * addition -- 4 Uint32Array(max) allocated once in the constructor -- and their
+ * counts reset with a scalar write, never a realloc, so their buffers are as
+ * fixed as the SoA columns.
  *
  * Three lanes at 20% / 60% / 95% occupancy, so the gate covers a near-empty
  * pool, a busy pool, and a near-saturated one -- the last is where SN-12's
@@ -67,7 +70,11 @@ function gateLane(frac, label) {
     for (let n = 0; n < SOA_NAMES.length; n++) {
         bytesBefore[n] = engine[SOA_NAMES[n]].buffer.byteLength;
     }
-    const bucketsBefore = engine._buckets.length;
+    const BIN_NAMES = ['_bin0', '_bin1', '_bin2', '_binMelt'];
+    const binBytesBefore = new Float64Array(BIN_NAMES.length);
+    for (let n = 0; n < BIN_NAMES.length; n++) {
+        binBytesBefore[n] = engine[BIN_NAMES[n]].buffer.byteLength;
+    }
 
     // Everything the hot body touches is already allocated. The engine allocates
     // nothing per frame; the mock ctx allocates nothing per call.
@@ -85,8 +92,11 @@ function gateLane(frac, label) {
         check(engine[name].buffer.byteLength === bytesBefore[n],
             () => `T6[${label}]: ${name} backing store grew ${bytesBefore[n]} -> ${engine[name].buffer.byteLength}`);
     }
-    check(engine._buckets.length === bucketsBefore,
-        () => `T6[${label}]: _buckets grew ${bucketsBefore} -> ${engine._buckets.length}`);
+    for (let n = 0; n < BIN_NAMES.length; n++) {
+        const name = BIN_NAMES[n];
+        check(engine[name].buffer.byteLength === binBytesBefore[n],
+            () => `T6[${label}]: ${name} backing store grew ${binBytesBefore[n]} -> ${engine[name].buffer.byteLength}`);
+    }
 
     if (!report.ok) {
         const gc = summary.gc;

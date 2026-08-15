@@ -25,11 +25,98 @@ import {
     nanDtSurvived, spawnBoundHolds, clearIsFullReset, destroyReleasesAll,
     countersAgree, spawnCapNoWrap,
 } from './harness.mjs';
+import { SnowOracle, tuplesMatch } from './t5-fuzz.mjs';
 
 const TAU = Math.PI * 2; // the frozen spawn-body copies below read TAU
+const MELT_BINS = 8;
 
 /** Retained sink so the control's allocations survive GC (arrayBuffers grows). */
 const leak = [];
+
+/** Distinct melt alpha bands + raw melter count for the CURRENT pool state. */
+function meltBins(e) {
+    const invMeltMax = 1 / e.config.meltTimeMax;
+    const seen = [0, 0, 0, 0, 0, 0, 0, 0];
+    let used = 0, melt = 0;
+    for (let i = 0; i < e.max; i++) {
+        if (e.state[i] !== 2) continue;
+        melt++;
+        let b = (e.life[i] * invMeltMax * e.z[i] * MELT_BINS) | 0;
+        if (b < 0) b = 0; else if (b > 7) b = 7;
+        if (seen[b] === 0) { seen[b] = 1; used++; }
+    }
+    return { used, melt };
+}
+
+/**
+ * A SnowEngine whose melt render is the PRE-S3 one-beginPath/fill-per-melter
+ * loop -- the batching removed. FROZEN: never update this to track the engine.
+ * On a scene with more than MELT_BINS melters its fill count is 3 + meltCount,
+ * which blows past the 3 + MELT_BINS ceiling the batched engine holds to.
+ */
+class UnbatchedMeltEngine extends SnowEngine {
+    updateAndDraw(ctx, dt, w, h) {
+        if (this._destroyed) return;
+        if (!ctx || typeof ctx.ellipse !== 'function' || typeof ctx.arc !== 'function') return;
+        dt = this._sane(dt, w, h); if (dt < 0) return;
+        this._elapsedTime += dt;
+        const invMeltMax = 1.0 / this.config.meltTimeMax;
+
+        for (let i = 0; i < this.max; i++) {
+            if (this.state[i] === 0) continue;
+            if (this.state[i] === 1) {
+                const sway = Math.sin(this._elapsedTime * this.driftSpeed[i] + this.driftPhase[i]) * this.driftAmp[i];
+                this.x[i] += (this.wz[i] + sway) * dt;
+                this.y[i] += this.gz[i] * dt;
+                if (!(this.x[i] >= -200 && this.x[i] <= w + 200 && this.y[i] >= -200)) {
+                    this.state[i] = 0; this._nFalling--; continue;
+                }
+                if (this.y[i] >= h) {
+                    this.y[i] = h; this.state[i] = 2;
+                    this._nFalling--; this._nMelting++;
+                    this.life[i] = this.config.meltTimeMin + this.config.rng() * (this.config.meltTimeMax - this.config.meltTimeMin);
+                }
+            } else if (this.state[i] === 2) {
+                this.life[i] -= dt;
+                if (this.life[i] <= 0) { this.state[i] = 0; this._nMelting--; }
+            }
+        }
+
+        try {
+            ctx.fillStyle = this.colorStr;
+            const alphas = [0.24, 0.44, 0.72];
+            for (let bk = 0; bk < 3; bk++) {
+                ctx.globalAlpha = alphas[bk];
+                ctx.beginPath();
+                for (let i = 0; i < this.max; i++) {
+                    if (this.state[i] === 1 && this.bucket[i] === bk) {
+                        ctx.moveTo(this.x[i] + this.radius[i], this.y[i]);
+                        ctx.arc(this.x[i], this.y[i], this.radius[i], 0, TAU);
+                    }
+                }
+                ctx.fill();
+            }
+            // FROZEN pre-S3: one beginPath/fill per melter (batching removed).
+            for (let i = 0; i < this.max; i++) {
+                if (this.state[i] === 2) {
+                    ctx.globalAlpha = (this.life[i] * invMeltMax) * this.z[i];
+                    ctx.beginPath();
+                    ctx.ellipse(this.x[i], this.y[i], this.radius[i] * 2.5, this.radius[i] * 0.5, 0, 0, TAU);
+                    ctx.fill();
+                }
+            }
+        } finally {
+            ctx.globalAlpha = 1.0;
+        }
+    }
+}
+
+function meltSceneConfig(seed) {
+    return {
+        gravity: 8000, wind: 0, density: 300,
+        meltTimeMin: 4.0, meltTimeMax: 8.0, rng: makeRng(seed),
+    };
+}
 
 export function run() {
     // Control 1 -- the alloc gate. A hot body that retains an allocation every
@@ -189,7 +276,7 @@ export function run() {
 
     // Control 8 -- destroy() re-inverted to the FROZEN v1.0.2 body: flag first,
     // then clear() (which then no-ops on the flag), then null the twelve columns
-    // ONLY. It never releases config/colorStr/_buckets and leaves the clock
+    // ONLY. It never releases config/colorStr/the render bins and leaves the clock
     // non-zero, so destroyReleasesAll rejects it; the fixed destroy passes.
     class RevertedDestroyEngine extends SnowEngine {
         destroy() {
@@ -289,5 +376,84 @@ export function run() {
     c10._nMelting -= 1; // hand-corrupt exactly one counter
     if (countersAgree(c10)) {
         die('T9 control 10: countersAgree held despite a hand-decremented _nMelting -- the T7 per-cycle counter assertion cannot fail');
+    }
+
+    // Control 2 -- the T5 differential comparator. tuplesMatch must HOLD on a
+    // synced engine/oracle pair and FLAG a corrupted oracle. A comparator that
+    // never diverges could not protect the S3 binning/ring-cursor rewrite.
+    {
+        const cfg = () => ({
+            gravity: 800, wind: 120, density: 30, baseRadius: 2.5,
+            driftAmplitude: 20, driftFreq: 1.0, meltTimeMin: 0.3, meltTimeMax: 0.8,
+            rng: makeRng(SEED ^ 0x2b2b2b2b),
+        });
+        const eng = new SnowEngine(64, cfg());
+        const ora = new SnowOracle(64, cfg());
+        const cctx = makeMockCtx();
+        for (let f = 0; f < 24; f++) {
+            eng.spawn(0.05, 800, 600); ora.spawn(0.05, 800, 600);
+            eng.updateAndDraw(cctx, 0.05, 800, 600); ora.step(0.05, 800, 600);
+        }
+        if (!tuplesMatch(eng, ora).ok) {
+            die('T9 control 2: a synced engine/oracle diverged -- the T5 fuzz passes for the wrong reason');
+        }
+        let idx = -1;
+        for (let i = 0; i < ora.max; i++) { if (ora.slots[i].state !== 0) { idx = i; break; } }
+        if (idx < 0) die('T9 control 2: the oracle has no live slot to corrupt (control setup broken)');
+        ora.slots[idx].x = ora.slots[idx].x + 1.5; // perturb one live tuple
+        if (tuplesMatch(eng, ora).ok) {
+            die('T9 control 2: tuplesMatch held despite a corrupted oracle slot -- the T5 comparator cannot fail');
+        }
+    }
+
+    // Control 5 -- the melt fill-count batching. Both directions:
+    //   (a) the batched engine on a >MELT_BINS-melter scene fills EXACTLY
+    //       3 + meltBinsUsed and never exceeds 3 + MELT_BINS;
+    //   (b) the SAME scene with batching removed (UnbatchedMeltEngine) fills
+    //       3 + meltCount, which exceeds the ceiling -- so the assertion bites;
+    //   (c) a batched NO-MELT scene fills exactly 3, so (a) is not vacuously
+    //       satisfied by melt always being present.
+    {
+        // (a) batched, many melters
+        const e = new SnowEngine(300, meltSceneConfig(SEED ^ 0x55aa55aa));
+        for (let f = 0; f < 12; f++) { e.spawn(0.016, 800, 600); e.updateAndDraw(makeMockCtx(), 0.016, 800, 600); }
+        const ctxA = makeMockCtx();
+        e.updateAndDraw(ctxA, 0.016, 800, 600);
+        const mb = meltBins(e);
+        if (!(mb.melt > MELT_BINS)) {
+            die('T9 control 5: batched scene has only ' + mb.melt + ' melters -- the ceiling would be vacuous');
+        }
+        if (ctxA.nFill !== 3 + mb.used) {
+            die('T9 control 5: batched engine filled ' + ctxA.nFill + ' != 3 + ' + mb.used + ' melt bands');
+        }
+        if (ctxA.nFill > 3 + MELT_BINS) {
+            die('T9 control 5: batched engine filled ' + ctxA.nFill + ' > 3 + ' + MELT_BINS + ' ceiling');
+        }
+
+        // (b) same scene, batching removed -> fill count blows the ceiling
+        const u = new UnbatchedMeltEngine(300, meltSceneConfig(SEED ^ 0x55aa55aa));
+        for (let f = 0; f < 12; f++) { u.spawn(0.016, 800, 600); u.updateAndDraw(makeMockCtx(), 0.016, 800, 600); }
+        const ctxB = makeMockCtx();
+        u.updateAndDraw(ctxB, 0.016, 800, 600);
+        const umb = meltBins(u);
+        if (ctxB.nFill !== 3 + umb.melt) {
+            die('T9 control 5: unbatched engine filled ' + ctxB.nFill + ' != 3 + ' + umb.melt + ' melters (control setup broken)');
+        }
+        if (ctxB.nFill <= 3 + MELT_BINS) {
+            die('T9 control 5: unbatched melt render stayed within the 3 + ' + MELT_BINS +
+                ' ceiling (' + ctxB.nFill + ') -- the fill-count assertion cannot fail');
+        }
+
+        // (c) batched, zero melt -> exactly 3 fills (non-vacuity of (a))
+        const z = new SnowEngine(300, { gravity: 40, wind: 0, density: 300, rng: makeRng(SEED ^ 0x0badf00d) });
+        z.spawn(0.016, 800, 600);
+        const ctxC = makeMockCtx();
+        z.updateAndDraw(ctxC, 0.016, 800, 600);
+        if (meltBins(z).melt !== 0) {
+            die('T9 control 5: the no-melt scene had melters (control setup broken)');
+        }
+        if (ctxC.nFill !== 3) {
+            die('T9 control 5: a no-melt frame filled ' + ctxC.nFill + ' != 3 -- the fill-count assertion is vacuous');
+        }
     }
 }

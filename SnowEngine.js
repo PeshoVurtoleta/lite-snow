@@ -1,17 +1,34 @@
 /**
- * @zakkster/lite-snow v1.0.3
+ * @zakkster/lite-snow v1.1.0
  * Zero-GC, SoA Environmental Snow Engine
- * Drift physics, Z-depth parallax, ellipse accumulation, bucketed rendering, 3 presets.
+ * Drift physics, Z-depth parallax, ellipse accumulation, bin-driven rendering, 3 presets.
  */
 
 import { toCssOklch } from '@zakkster/lite-color';
 
-export const VERSION = '1.0.3';
+export const VERSION = '1.1.0';
 
 const TAU = Math.PI * 2;
 const DT_MAX = 0.1;
 const MAX_PARTICLES = 10000000;
 const MIN_RADIUS = 0.01;
+
+// Melt render is batched into MELT_BINS alpha bands: at most one beginPath/fill
+// pair per band instead of one per particle (SN-06). Fill count per frame is
+// exactly 3 depth buckets + the number of melt bands actually populated.
+const MELT_BINS = 8;
+const MELT_BIN_STEP = 1 / MELT_BINS; // 0.125; band b renders at (b + 0.5) * step
+// A live slot index (< MAX_PARTICLES < 2**24) is packed into the low 24 bits of
+// a melt-bin entry and its alpha band into the top bits, so render reads the
+// band with a shift and the slot with a mask -- no per-entry alpha recompute.
+const MELT_INDEX_MASK = 0xFFFFFF;
+const MELT_BIN_SHIFT = 24;
+
+// The three depth-bucket render alphas (bucket zAvg * 0.8, folded to constants
+// now that the loop over descriptor objects is gone): 0.3*0.8, 0.55*0.8, 0.9*0.8.
+const BUCKET0_ALPHA = 0.24;
+const BUCKET1_ALPHA = 0.44;
+const BUCKET2_ALPHA = 0.72;
 
 export class SnowEngine {
     constructor(maxParticles = 10000, config = {}) {
@@ -64,11 +81,20 @@ export class SnowEngine {
         this._lastH = 0;
         this._areaModifier = 0;
 
-        this._buckets = [
-            { id: 0, zAvg: 0.3 },
-            { id: 1, zAvg: 0.55 },
-            { id: 2, zAvg: 0.9 } 
-        ];
+        // Render bins, allocated once. Each frame the physics pass folds every
+        // live slot's FINAL state into one of these (SN-11/SN-13), so the render
+        // pass iterates only live indices instead of scanning the whole pool
+        // four times. Fill counts are frame-local and live as locals in
+        // updateAndDraw -- these arrays are the only per-frame render state.
+        this._bin0 = new Uint32Array(this.max);   // depth bucket 0 (near)
+        this._bin1 = new Uint32Array(this.max);   // depth bucket 1 (mid)
+        this._bin2 = new Uint32Array(this.max);   // depth bucket 2 (far)
+        this._binMelt = new Uint32Array(this.max); // settled/melting slots (packed)
+        this._meltAlphaCount = new Uint32Array(MELT_BINS); // per-band populate flags
+
+        // Ring cursor for spawn: the next slot to probe, wrapping at max, so a
+        // spawn is O(spawned) amortised instead of O(max)-from-zero (SN-12).
+        this._spawnCursor = 0;
     }
 
     /** Fail-closed frame door. Returns the clamped dt, or -1 to reject the frame. */
@@ -96,33 +122,55 @@ export class SnowEngine {
         const g = this.config.gravity;
         let windOffset = g === 0 ? 0 : (h / g) * Math.abs(this.config.wind);
         if (!Number.isFinite(windOffset)) windOffset = 0;
+
+        // Hoisted config/columns -- read once, not per slot.
+        const rng = this.config.rng;
+        const gravity = this.config.gravity;
+        const wind = this.config.wind;
+        const baseRadius = this.config.baseRadius;
+        const driftAmplitude = this.config.driftAmplitude;
+        const driftFreq = this.config.driftFreq;
+        const max = this.max;
+        const state = this.state, x = this.x, y = this.y, z = this.z;
+        const gz = this.gz, wz = this.wz, bucket = this.bucket, radius = this.radius;
+        const driftPhase = this.driftPhase, driftSpeed = this.driftSpeed, driftAmp = this.driftAmp;
+
+        // Ring cursor: probe at most `max` slots starting where the last spawn
+        // left off, filling free ones until the cap is met. A full wrap that
+        // finds nothing free stops -- it never spins (SN-12, fail closed).
+        let cursor = this._spawnCursor;
         let spawned = 0;
+        let scanned = 0;
+        while (scanned < max) {
+            const i = cursor;
+            cursor = cursor + 1 === max ? 0 : cursor + 1;
+            scanned++;
+            if (state[i] !== 0) continue;
 
-        for (let i = 0; i < this.max; i++) {
-            if (this.state[i] === 0) {
-                this.state[i] = 1;
-                this._nFalling++;
+            state[i] = 1;
+            this._nFalling++;
 
-                this.x[i] = this.config.rng() * (w + windOffset * 2) - windOffset;
-                this.y[i] = -50 - this.config.rng() * 50;
-                
-                this.z[i] = 0.2 + this.config.rng() * 0.8;
-                
-                this.gz[i] = this.config.gravity * this.z[i];
-                this.wz[i] = this.config.wind * this.z[i];
-                
-                const jitter = (this.config.rng() - 0.5) * 0.8;
-                const r = (this.config.baseRadius + jitter) * this.z[i];
-                this.radius[i] = r > MIN_RADIUS ? r : MIN_RADIUS;
-                this.driftAmp[i] = this.config.driftAmplitude * this.z[i];
-                
-                this.bucket[i] = this.z[i] < 0.4 ? 0 : this.z[i] < 0.7 ? 1 : 2;
-                this.driftPhase[i] = this.config.rng() * TAU;
-                this.driftSpeed[i] = this.config.driftFreq + (this.config.rng() - 0.5) * 0.5;
+            x[i] = rng() * (w + windOffset * 2) - windOffset;
+            y[i] = -50 - rng() * 50;
 
-                if (++spawned >= cap) return;
-            }
+            z[i] = 0.2 + rng() * 0.8;
+            const zi = z[i]; // the f32-rounded store, as the derived params read it
+
+            gz[i] = gravity * zi;
+            wz[i] = wind * zi;
+
+            const jitter = (rng() - 0.5) * 0.8;
+            const r = (baseRadius + jitter) * zi;
+            radius[i] = r > MIN_RADIUS ? r : MIN_RADIUS;
+            driftAmp[i] = driftAmplitude * zi;
+
+            bucket[i] = zi < 0.4 ? 0 : zi < 0.7 ? 1 : 2;
+            driftPhase[i] = rng() * TAU;
+            driftSpeed[i] = driftFreq + (rng() - 0.5) * 0.5;
+
+            if (++spawned >= cap) break;
         }
+        this._spawnCursor = cursor;
     }
 
     updateAndDraw(ctx, dt, w, h) {
@@ -130,61 +178,116 @@ export class SnowEngine {
         if (!ctx || typeof ctx.ellipse !== 'function' || typeof ctx.arc !== 'function') return;
         dt = this._sane(dt, w, h); if (dt < 0) return;
         this._elapsedTime += dt;
+        const et = this._elapsedTime;
+
+        // Hoisted config/columns -- read once, above both loops (SN-14).
+        const meltTimeMin = this.config.meltTimeMin;
+        const meltRange = this.config.meltTimeMax - this.config.meltTimeMin;
+        const rng = this.config.rng;
         const invMeltMax = 1.0 / this.config.meltTimeMax;
+        const max = this.max;
+        const state = this.state, x = this.x, y = this.y, z = this.z;
+        const gz = this.gz, wz = this.wz, bucket = this.bucket, radius = this.radius;
+        const driftPhase = this.driftPhase, driftSpeed = this.driftSpeed;
+        const driftAmp = this.driftAmp, life = this.life;
 
-        // --- 1. GLOBAL PHYSICS PASS ---
-        for (let i = 0; i < this.max; i++) {
-            if (this.state[i] === 0) continue;
+        const bin0 = this._bin0, bin1 = this._bin1, bin2 = this._bin2, binMelt = this._binMelt;
+        const meltAlphaCount = this._meltAlphaCount;
+        let n0 = 0, n1 = 0, n2 = 0, nMelt = 0;
+        meltAlphaCount[0] = 0; meltAlphaCount[1] = 0; meltAlphaCount[2] = 0; meltAlphaCount[3] = 0;
+        meltAlphaCount[4] = 0; meltAlphaCount[5] = 0; meltAlphaCount[6] = 0; meltAlphaCount[7] = 0;
 
-            if (this.state[i] === 1) {
-                const sway = Math.sin(this._elapsedTime * this.driftSpeed[i] + this.driftPhase[i]) * this.driftAmp[i];
-                
-                this.x[i] += (this.wz[i] + sway) * dt; 
-                this.y[i] += this.gz[i] * dt; 
+        // --- 1. GLOBAL PHYSICS PASS (folds the render bin push in, SN-13) ---
+        for (let i = 0; i < max; i++) {
+            const s = state[i];
+            if (s === 0) continue;
+
+            if (s === 1) {
+                const sway = Math.sin(et * driftSpeed[i] + driftPhase[i]) * driftAmp[i];
+
+                x[i] += (wz[i] + sway) * dt;
+                y[i] += gz[i] * dt;
 
                 // Off-screen culling (X-axis wind leak AND Y-axis negative gravity leak)
-                if (!(this.x[i] >= -200 && this.x[i] <= w + 200 && this.y[i] >= -200)) {
-                    this.state[i] = 0;
+                if (!(x[i] >= -200 && x[i] <= w + 200 && y[i] >= -200)) {
+                    state[i] = 0;
                     this._nFalling--;
                     continue;
                 }
 
-                if (this.y[i] >= h) {
-                    this.y[i] = h;
-                    this.state[i] = 2;
+                if (y[i] >= h) {
+                    y[i] = h;
+                    state[i] = 2;
                     this._nFalling--; this._nMelting++;
-                    this.life[i] = this.config.meltTimeMin + this.config.rng() * (this.config.meltTimeMax - this.config.meltTimeMin);
+                    life[i] = meltTimeMin + rng() * meltRange;
                 }
+            } else { // s === 2
+                life[i] -= dt;
+                if (life[i] <= 0) { state[i] = 0; this._nMelting--; continue; }
+                if (y[i] > h) y[i] = h; // resize-shrink clamp, melt branch only (SN-08)
             }
-            else if (this.state[i] === 2) {
-                this.life[i] -= dt;
-                if (this.life[i] <= 0) { this.state[i] = 0; this._nMelting--; }
+
+            // Push this live slot's FINAL state into its render bin.
+            if (state[i] === 1) {
+                const bk = bucket[i];
+                if (bk === 0) bin0[n0++] = i;
+                else if (bk === 1) bin1[n1++] = i;
+                else bin2[n2++] = i;
+            } else { // settled/melting -> quantized alpha band
+                let b = (life[i] * invMeltMax * z[i] * MELT_BINS) | 0;
+                if (b < 0) b = 0; else if (b >= MELT_BINS) b = MELT_BINS - 1;
+                binMelt[nMelt++] = i | (b << MELT_BIN_SHIFT);
+                meltAlphaCount[b] = 1;
             }
         }
 
-        // --- 2. BUCKETED RENDER PIPELINE ---
+        // --- 2. BIN-DRIVEN RENDER PIPELINE ---
+        // Exactly 3 depth-bucket fills + one fill per populated melt band.
         try {
             ctx.fillStyle = this.colorStr;
 
-            for (const bucket of this._buckets) {
-                ctx.globalAlpha = bucket.zAvg * 0.8;
+            ctx.globalAlpha = BUCKET0_ALPHA;
+            ctx.beginPath();
+            for (let j = 0; j < n0; j++) {
+                const i = bin0[j];
+                ctx.moveTo(x[i] + radius[i], y[i]);
+                ctx.arc(x[i], y[i], radius[i], 0, TAU);
+            }
+            ctx.fill();
+
+            ctx.globalAlpha = BUCKET1_ALPHA;
+            ctx.beginPath();
+            for (let j = 0; j < n1; j++) {
+                const i = bin1[j];
+                ctx.moveTo(x[i] + radius[i], y[i]);
+                ctx.arc(x[i], y[i], radius[i], 0, TAU);
+            }
+            ctx.fill();
+
+            ctx.globalAlpha = BUCKET2_ALPHA;
+            ctx.beginPath();
+            for (let j = 0; j < n2; j++) {
+                const i = bin2[j];
+                ctx.moveTo(x[i] + radius[i], y[i]);
+                ctx.arc(x[i], y[i], radius[i], 0, TAU);
+            }
+            ctx.fill();
+
+            // Melt: one beginPath/fill per populated alpha band (SN-06). Each
+            // band re-reads the packed melt bin; the band lives in the top bits.
+            for (let b = 0; b < MELT_BINS; b++) {
+                if (meltAlphaCount[b] === 0) continue;
+                ctx.globalAlpha = (b + 0.5) * MELT_BIN_STEP;
                 ctx.beginPath();
-                for (let i = 0; i < this.max; i++) {
-                    if (this.state[i] === 1 && this.bucket[i] === bucket.id) {
-                        ctx.moveTo(this.x[i] + this.radius[i], this.y[i]);
-                        ctx.arc(this.x[i], this.y[i], this.radius[i], 0, TAU);
-                    }
+                for (let j = 0; j < nMelt; j++) {
+                    const e = binMelt[j];
+                    if ((e >>> MELT_BIN_SHIFT) !== b) continue;
+                    const i = e & MELT_INDEX_MASK;
+                    const rx = radius[i] * 2.5;
+                    ctx.moveTo(x[i] + rx, y[i]);
+                    ctx.ellipse(x[i], y[i], rx, radius[i] * 0.5, 0, 0, TAU);
                 }
                 ctx.fill();
-            }
-
-            for (let i = 0; i < this.max; i++) {
-                if (this.state[i] === 2) {
-                    ctx.globalAlpha = (this.life[i] * invMeltMax) * this.z[i];
-                    ctx.beginPath();
-                    ctx.ellipse(this.x[i], this.y[i], this.radius[i] * 2.5, this.radius[i] * 0.5, 0, 0, TAU);
-                    ctx.fill();
-                }
             }
         } finally {
             ctx.globalAlpha = 1.0;
@@ -200,6 +303,7 @@ export class SnowEngine {
         this._areaModifier = 0;
         this._nFalling = 0;
         this._nMelting = 0;
+        this._spawnCursor = 0;
     }
 
     destroy() {
@@ -210,7 +314,9 @@ export class SnowEngine {
         this.wz = null; this.bucket = null; this.radius = null;
         this.driftPhase = null; this.driftSpeed = null; this.driftAmp = null;
         this.life = null; this.state = null;
-        this.config = null; this.colorStr = null; this._buckets = null;
+        this._bin0 = null; this._bin1 = null; this._bin2 = null;
+        this._binMelt = null; this._meltAlphaCount = null;
+        this.config = null; this.colorStr = null;
     }
 
     get fallingCount() { return this._nFalling; }

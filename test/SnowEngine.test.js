@@ -180,7 +180,7 @@ describe('boundary', () => {
     test('VERSION is exported and agrees with package.json (three-place sync)', () => {
         const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
         assert.equal(typeof VERSION, 'string');
-        assert.equal(VERSION, '1.0.3');
+        assert.equal(VERSION, '1.1.0');
         assert.equal(VERSION, pkg.version, 'VERSION const and package.json disagree');
     });
 
@@ -529,14 +529,18 @@ describe('S2 constructor, freeze, lifecycle, telemetry', () => {
         assert.ok(Object.is(A._elapsedTime, B._elapsedTime), '_elapsedTime must match');
     });
 
-    test('destroy() releases config, colorStr and _buckets and zeroes the clock', () => {
+    test('destroy() releases config, colorStr and the render bins and zeroes the clock', () => {
         const e = new SnowEngine(100, { density: 200 });
         e.spawn(0.016, 800, 600);
         e.updateAndDraw(ctx, 0.016, 800, 600);
         e.destroy();
         assert.equal(e.config, null, 'destroy() must null config');
         assert.equal(e.colorStr, null, 'destroy() must null colorStr');
-        assert.equal(e._buckets, null, 'destroy() must null _buckets');
+        assert.equal(e._bin0, null, 'destroy() must null _bin0');
+        assert.equal(e._bin1, null, 'destroy() must null _bin1');
+        assert.equal(e._bin2, null, 'destroy() must null _bin2');
+        assert.equal(e._binMelt, null, 'destroy() must null _binMelt');
+        assert.equal(e._meltAlphaCount, null, 'destroy() must null _meltAlphaCount');
         assert.equal(e._elapsedTime, 0, 'destroy() must reset the clock via clear()');
         assert.equal(e._destroyed, true, 'destroy() must set the flag');
         assert.doesNotThrow(() => e.destroy(), 'double destroy() must be a no-op');

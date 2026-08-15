@@ -275,11 +275,11 @@ export function clearIsFullReset(engine, ctx) {
 
 /**
  * destroy() must release EVERYTHING: the twelve SoA columns, `config`,
- * `colorStr` and `_buckets` all null, the clock and both dimension-cache fields
- * and both counters zeroed (via the clear() it runs FIRST, before the flag), and
- * `_destroyed` true. Calls destroy() on `engine`, so pass a live one. A destroy
- * that sets the flag before clear() (T9 control 8) leaves `_elapsedTime` non-zero
- * and `config` non-null and fails here. Test-only.
+ * `colorStr` and the five render bins all null, the clock and both
+ * dimension-cache fields and both counters zeroed (via the clear() it runs
+ * FIRST, before the flag), and `_destroyed` true. Calls destroy() on `engine`,
+ * so pass a live one. A destroy that sets the flag before clear() (T9 control 8)
+ * leaves `_elapsedTime` non-zero and `config` non-null and fails here. Test-only.
  * @returns {boolean}
  */
 export function destroyReleasesAll(engine) {
@@ -289,7 +289,8 @@ export function destroyReleasesAll(engine) {
     }
     if (engine.config !== null) return false;
     if (engine.colorStr !== null) return false;
-    if (engine._buckets !== null) return false;
+    if (engine._bin0 !== null || engine._bin1 !== null || engine._bin2 !== null) return false;
+    if (engine._binMelt !== null || engine._meltAlphaCount !== null) return false;
     if (engine._elapsedTime !== 0) return false;
     if (engine._lastW !== 0 || engine._lastH !== 0 || engine._areaModifier !== 0) return false;
     if (engine._nFalling !== 0 || engine._nMelting !== 0) return false;
