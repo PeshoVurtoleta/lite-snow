@@ -22,7 +22,7 @@
  */
 
 import { SnowEngine } from '../../SnowEngine.js';
-import { SEED, makeRng, check, makeMockCtx, conservation } from './harness.mjs';
+import { SEED, makeRng, check, makeMockCtx, conservation, spawnBoundHolds } from './harness.mjs';
 
 const MAX = 400;
 const FRAMES = 200;
@@ -113,16 +113,9 @@ export function run() {
 
     // --- Law 4: spawn bound (the SN-02 detector, on VALID inputs) -----------
     // One spawn raises the live count by at most floor(areaModifier*density*dt*60).
+    // Shares spawnBoundHolds with T9 control 4, so T0 and the control exercise the
+    // same predicate on the same code path.
     const s = new SnowEngine(MAX, { density: 20, rng: makeRng(SEED ^ 0x0f0f0f0f) });
-    const dt = 0.016;
-    let liveBefore = 0;
-    for (let i = 0; i < MAX; i++) if (s.state[i] !== 0) liveBefore++;
-    s.spawn(dt, W, H);
-    let liveAfter = 0;
-    for (let i = 0; i < MAX; i++) if (s.state[i] !== 0) liveAfter++;
-    const bound = Math.floor(s._areaModifier * s.config.density * (dt * 60));
-    check(liveAfter - liveBefore <= bound,
-        () => `T0.spawnbound: one spawn added ${liveAfter - liveBefore}, bound ${bound} (seed=${SEED})`);
-    check(liveAfter - liveBefore >= 0,
-        () => `T0.spawnbound: live count decreased on spawn (seed=${SEED})`);
+    check(spawnBoundHolds(s, 0.016, W, H),
+        () => `T0.spawnbound: one spawn exceeded floor(areaModifier*density*dt*60) or dropped the live count (seed=${SEED})`);
 }

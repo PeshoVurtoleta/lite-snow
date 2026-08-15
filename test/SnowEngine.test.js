@@ -180,7 +180,7 @@ describe('boundary', () => {
     test('VERSION is exported and agrees with package.json (three-place sync)', () => {
         const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
         assert.equal(typeof VERSION, 'string');
-        assert.equal(VERSION, '1.0.1');
+        assert.equal(VERSION, '1.0.2');
         assert.equal(VERSION, pkg.version, 'VERSION const and package.json disagree');
     });
 
@@ -238,5 +238,208 @@ describe('boundary', () => {
             { density: 24.0, wind: 150, gravity: 80, driftAmplitude: 25, baseRadius: 3.5 });
         assert.deepEqual(SNOW_PRESETS.blizzard,
             { density: 40.0, wind: 400, gravity: 250, driftAmplitude: 50, baseRadius: 2.0 });
+    });
+});
+
+/**
+ * S1 fail-closed door. Promotes SN-01..SN-05 from known-issue reproductions to
+ * fatal assertions. Each asserts on the SoA arrays / clock, never on a return
+ * value: the door draws NOTHING on a rejected frame, so a return value carries
+ * no signal.
+ */
+describe('S1 fail-closed door', () => {
+    const SOA = [
+        'x', 'y', 'z', 'gz', 'wz', 'bucket',
+        'radius', 'driftPhase', 'driftSpeed', 'driftAmp', 'life', 'state',
+    ];
+
+    // Seeded xorshift32 -> [0,1). Deterministic across runs.
+    function seeded(seed) {
+        let s = (seed >>> 0) || 1;
+        return function rng() {
+            s ^= s << 13; s >>>= 0;
+            s ^= s >> 17;
+            s ^= s << 5; s >>>= 0;
+            return s / 4294967296;
+        };
+    }
+
+    function liveCount(e) {
+        let n = 0;
+        for (let i = 0; i < e.max; i++) if (e.state[i] !== 0) n++;
+        return n;
+    }
+
+    function conserv(e) {
+        let free = 0, falling = 0, melting = 0;
+        for (let i = 0; i < e.max; i++) {
+            const s = e.state[i];
+            if (s === 0) free++;
+            else if (s === 1) falling++;
+            else if (s === 2) melting++;
+            else return false;
+        }
+        return free + falling + melting === e.max;
+    }
+
+    test('SN-01: a NaN dt neither advances the clock nor poisons the pool', () => {
+        const e = new SnowEngine(200, { density: 100, rng: seeded(0x1234) });
+        e.spawn(0.016, 800, 600);
+        e.updateAndDraw(ctx, NaN, 800, 600);
+        for (let f = 0; f < 100; f++) e.updateAndDraw(ctx, 0.016, 800, 600);
+        assert.ok(Number.isFinite(e._elapsedTime), '_elapsedTime must stay finite');
+        for (let i = 0; i < e.max; i++) {
+            if (e.state[i] !== 0) {
+                assert.ok(Number.isFinite(e.x[i]), `x[${i}] must be finite`);
+                assert.ok(Number.isFinite(e.y[i]), `y[${i}] must be finite`);
+            }
+        }
+    });
+
+    test('SN-02: degenerate w/h cannot overfill the pool', () => {
+        const e = new SnowEngine(10000, { density: 100, rng: seeded(0x5678) });
+        e.spawn(0.016, NaN, 600);
+        assert.equal(liveCount(e), 0, 'NaN w must spawn nothing');
+        e.spawn(0.016, 0, 600);
+        assert.equal(liveCount(e), 0, 'zero w must spawn nothing');
+    });
+
+    test('SN-03: gravity 0 spawns finite x within [0, w]', () => {
+        const e = new SnowEngine(10, { gravity: 0, density: 200, rng: seeded(0x9abc) });
+        e.spawn(1, 800, 600);
+        let checked = 0;
+        for (let i = 0; i < e.max; i++) {
+            if (e.state[i] === 1) {
+                assert.ok(Number.isFinite(e.x[i]), `x[${i}] must be finite`);
+                assert.ok(e.x[i] >= 0 && e.x[i] <= 800, `x[${i}]=${e.x[i]} must be in [0,800]`);
+                checked++;
+            }
+        }
+        assert.ok(checked > 0, 'no live slots checked -- assertion would be vacuous');
+
+        // gravity:-1 must render bit-identically to v1.0.1. The finite-gravity
+        // windOffset formula is unchanged, so recompute the exact old value and
+        // assert Object.is equality on every spawned x (f32-stored).
+        const rec = [];
+        const base = seeded(0xdef0);
+        const recRng = () => { const v = base(); rec.push(v); return v; };
+        const en = new SnowEngine(10, { gravity: -1, density: 200, rng: recRng });
+        en.spawn(1, 800, 600);
+        const windOffset = (600 / -1) * Math.abs(en.config.wind); // v1.0.1 formula
+        let k = 0;
+        for (let i = 0; i < en.max; i++) {
+            if (en.state[i] === 1) {
+                const expected = Math.fround(rec[6 * k] * (800 + windOffset * 2) - windOffset);
+                assert.ok(Object.is(en.x[i], expected),
+                    `slot ${i}: x=${en.x[i]} != v1.0.1 expected ${expected}`);
+                assert.ok(Number.isFinite(en.x[i]), `x[${i}] must be finite`);
+                k++;
+            }
+        }
+        assert.ok(k > 0, 'no negative-gravity slots checked -- assertion would be vacuous');
+    });
+
+    test('SN-04: a hand-poisoned NaN slot recycles in one frame', () => {
+        const e = new SnowEngine(8, { density: 400, rng: seeded(0x0f0f) });
+        e.spawn(0.016, 800, 600); // high cap fills the whole 8-slot pool
+        assert.equal(liveCount(e), 8, 'the pool should be full for a deterministic reuse test');
+        e.x[0] = NaN; // hand-poison one live slot
+        e.updateAndDraw(ctx, 0.016, 800, 600);
+        assert.equal(e.state[0], 0, 'the NaN slot must recycle to free in one frame');
+        assert.ok(conserv(e), 'pool conservation must hold after the cull');
+        e.spawn(0.016, 800, 600); // only slot 0 is free -> it must be reused
+        assert.notEqual(e.state[0], 0, 'the freed slot must be reused by the next spawn');
+    });
+
+    test('SN-05: negative dt is a total no-op', () => {
+        const e = new SnowEngine(200, { density: 100, rng: seeded(0x2468) });
+        e.spawn(0.016, 800, 600);
+        e.updateAndDraw(ctx, 0.05, 800, 600); // advance to a non-trivial state
+        // Twelve pre-allocated snapshots, taken once before the rejected frame.
+        const snap = {};
+        for (const name of SOA) snap[name] = e[name].slice();
+        const elapsedBefore = e._elapsedTime;
+        // A counting ctx: a rejected frame must never reach the render section.
+        const cctx = {
+            clearRect() {}, beginPath() {}, moveTo() {},
+            arc() {}, ellipse() {}, fill() { this.nFill++; },
+            globalAlpha: 1, fillStyle: '', nFill: 0,
+        };
+        e.updateAndDraw(cctx, -1, 800, 600);
+        for (const name of SOA) {
+            const before = snap[name];
+            const after = e[name];
+            for (let i = 0; i < e.max; i++) {
+                assert.ok(Object.is(before[i], after[i]),
+                    `${name}[${i}] changed on a negative-dt frame: ${before[i]} -> ${after[i]}`);
+            }
+        }
+        assert.ok(Object.is(e._elapsedTime, elapsedBefore), '_elapsedTime must not move');
+        assert.equal(cctx.nFill, 0, 'a rejected frame must draw nothing');
+    });
+});
+
+/**
+ * Two behaviours that the S1 mutation matrix proved NOTHING asserted on. Both
+ * mutations ran green across the whole suite and every torture tier, which is
+ * the definition of an untested behaviour:
+ *
+ *   - moving the spawn door BELOW the dimension-cache write survived, so the
+ *     ordering the door depends on was load-bearing but unpinned;
+ *   - deleting the cull's `y >= -200` term survived, so the y-axis leak guard
+ *     (the negative-gravity path) was never exercised. That hole predates S1.
+ *
+ * Each test below is proven non-vacuous by the mutation it was written against.
+ */
+describe('S1 mutation-matrix holes', () => {
+    function seeded(seed) {
+        let s = (seed >>> 0) || 1;
+        return function rng() {
+            s ^= s << 13; s >>>= 0;
+            s ^= s >> 17;
+            s ^= s << 5; s >>>= 0;
+            return s / 4294967296;
+        };
+    }
+
+    function liveCount(e) {
+        let n = 0;
+        for (let i = 0; i < e.max; i++) if (e.state[i] !== 0) n++;
+        return n;
+    }
+
+    test('a rejected spawn() cannot poison the dimension cache', () => {
+        // The door must sit ABOVE the _lastW/_lastH/_areaModifier write. If it
+        // sits below, a NaN w writes _areaModifier = NaN before the rejection.
+        const e = new SnowEngine(100, { density: 50, rng: seeded(0x1111) });
+        e.spawn(0.016, 800, 600); // prime the cache
+        const w0 = e._lastW, h0 = e._lastH, m0 = e._areaModifier;
+        assert.ok(Number.isFinite(m0) && m0 > 0,
+            'the cache must be primed for this test to mean anything');
+
+        e.spawn(0.016, NaN, 600);
+        assert.ok(Object.is(e._lastW, w0), '_lastW moved on a NaN-w spawn');
+        assert.ok(Object.is(e._lastH, h0), '_lastH moved on a NaN-w spawn');
+        assert.ok(Object.is(e._areaModifier, m0), '_areaModifier poisoned by a NaN-w spawn');
+
+        e.spawn(0.016, 800, 0);
+        assert.ok(Object.is(e._areaModifier, m0), '_areaModifier moved on a zero-h spawn');
+
+        // The cache still works: a genuine resize must still recompute.
+        e.spawn(0.016, 1024, 768);
+        assert.notEqual(e._areaModifier, m0, 'a real resize must still recompute the cache');
+    });
+
+    test('a flake that rises off the top is culled (y-axis leak)', () => {
+        // Negative gravity makes gz negative, so y walks upward past -200. The
+        // cull's `y >= -200` term is the only thing that recycles these slots;
+        // without it they rise forever and the pool leaks.
+        const e = new SnowEngine(64, {
+            gravity: -400, wind: 0, density: 400, rng: seeded(0x2222),
+        });
+        e.spawn(0.016, 800, 600);
+        assert.ok(liveCount(e) > 0, 'need live flakes for this test to mean anything');
+        for (let i = 0; i < 200; i++) e.updateAndDraw(ctx, 0.016, 800, 600);
+        assert.equal(liveCount(e), 0, 'every rising flake must be culled above y = -200');
     });
 });

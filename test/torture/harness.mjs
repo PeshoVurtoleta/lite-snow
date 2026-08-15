@@ -202,6 +202,49 @@ export function conservation(engine) {
 }
 
 /**
+ * The spawn-bound law as a BOOLEAN predicate (not check-wrapped) so T0 Law 4 and
+ * T9 control 4 share ONE implementation. Runs a single spawn and asserts the live
+ * delta is within floor(areaModifier*density*dt*60). The fail-closed `bound = 0`
+ * for degenerate input is the law statement, not a fudge: a degenerate frame the
+ * door rejects moves nothing, so its bound is exactly zero. O(max) -- test only.
+ * @returns {boolean}
+ */
+export function spawnBoundHolds(engine, dt, w, h) {
+    const state = engine.state;
+    const max = engine.max;
+    let before = 0;
+    for (let i = 0; i < max; i++) if (state[i] !== 0) before++;
+    engine.spawn(dt, w, h);
+    let after = 0;
+    for (let i = 0; i < max; i++) if (state[i] !== 0) after++;
+    const delta = after - before;
+    const raw = Math.floor(engine._areaModifier * engine.config.density * (dt * 60));
+    const bound = Number.isFinite(raw) && raw > 0 ? raw : 0;
+    return delta >= 0 && delta <= bound;
+}
+
+/**
+ * The SN-01 survival law as a BOOLEAN predicate. One good spawn, one poisoned
+ * updateAndDraw(ctx, NaN, ...), then 100 good frames; returns true iff the clock
+ * stayed finite AND every live particle is finite. Shared by T9 control 3 and the
+ * SN-01 gate. O(max) -- test only.
+ * @returns {boolean}
+ */
+export function nanDtSurvived(engine, ctx) {
+    engine.spawn(0.016, 800, 600);
+    engine.updateAndDraw(ctx, NaN, 800, 600);
+    for (let f = 0; f < 100; f++) engine.updateAndDraw(ctx, 0.016, 800, 600);
+    if (!Number.isFinite(engine._elapsedTime)) return false;
+    const state = engine.state;
+    for (let i = 0; i < engine.max; i++) {
+        if (state[i] !== 0) {
+            if (!Number.isFinite(engine.x[i]) || !Number.isFinite(engine.y[i])) return false;
+        }
+    }
+    return true;
+}
+
+/**
  * Run `fn(i)` under a single measured window and gate it against RULES.
  * Uses measureOps with `stabilize:'deep'` so the `maxArrayBuffersGrowth` rule
  * is resolvable (typed-array backing stores live OUTSIDE the V8 heap and are

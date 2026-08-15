@@ -59,8 +59,17 @@ export declare class SnowEngine {
     constructor(maxParticles?: number, config?: SnowConfig);
 
     /**
+     * Fail-closed frame door. Returns the clamped dt (capped at 0.1), or -1 to
+     * reject the frame when dt is non-finite/negative or w/h is non-positive or
+     * non-finite. @internal
+     */
+    _sane(dt: number, w: number, h: number): number;
+
+    /**
      * Spawn new snowflakes. Call every frame before updateAndDraw().
      * Spawn count auto-scales with canvas area × density × dt.
+     * A non-finite or negative dt, or a non-positive/non-finite w/h, is a
+     * documented no-op frame: no slots are touched.
      */
     spawn(dt: number, w: number, h: number): void;
 
@@ -68,6 +77,8 @@ export declare class SnowEngine {
      * Update physics and render all snow particles.
      * Does NOT clear the canvas — snow is an overlay. Caller clears.
      * Call spawn() before this each frame.
+     * A non-finite or negative dt, or a non-positive/non-finite w/h, is a
+     * documented no-op frame: the clock does not advance and no state is touched.
      */
     updateAndDraw(ctx: CanvasRenderingContext2D, dt: number, w: number, h: number): void;
 

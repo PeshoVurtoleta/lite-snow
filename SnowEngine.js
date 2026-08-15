@@ -1,14 +1,15 @@
 /**
- * @zakkster/lite-snow v1.0.1
+ * @zakkster/lite-snow v1.0.2
  * Zero-GC, SoA Environmental Snow Engine
  * Drift physics, Z-depth parallax, ellipse accumulation, bucketed rendering, 3 presets.
  */
 
 import { toCssOklch } from '@zakkster/lite-color';
 
-export const VERSION = '1.0.1';
+export const VERSION = '1.0.2';
 
 const TAU = Math.PI * 2;
+const DT_MAX = 0.1;
 
 export class SnowEngine {
     constructor(maxParticles = 10000, config = {}) {
@@ -59,10 +60,18 @@ export class SnowEngine {
         ];
     }
 
+    /** Fail-closed frame door. Returns the clamped dt, or -1 to reject the frame. */
+    _sane(dt, w, h) {
+        if (!Number.isFinite(dt) || dt < 0) return -1;
+        if (!Number.isFinite(w) || w <= 0) return -1;
+        if (!Number.isFinite(h) || h <= 0) return -1;
+        return dt > DT_MAX ? DT_MAX : dt;
+    }
+
     spawn(dt, w, h) {
         if (this._destroyed) return;
-        if (dt > 0.1) dt = 0.1;
-        
+        dt = this._sane(dt, w, h); if (dt < 0) return;
+
         // Only recompute area modifier on dimension change
         if (this._lastW !== w || this._lastH !== h) {
             this._lastW = w;
@@ -70,15 +79,17 @@ export class SnowEngine {
             this._areaModifier = (w * h) / 100000;
         }
 
-        const targetSpawns = Math.floor(this._areaModifier * this.config.density * (dt * 60));
+        const cap = Math.floor(this._areaModifier * this.config.density * (dt * 60)) | 0;
+        if (cap <= 0) return;
+        const g = this.config.gravity;
+        let windOffset = g === 0 ? 0 : (h / g) * Math.abs(this.config.wind);
+        if (!Number.isFinite(windOffset)) windOffset = 0;
         let spawned = 0;
-        if (targetSpawns <= 0) return;
 
         for (let i = 0; i < this.max; i++) {
             if (this.state[i] === 0) {
-                this.state[i] = 1; 
-                
-                const windOffset = (h / this.config.gravity) * Math.abs(this.config.wind);
+                this.state[i] = 1;
+
                 this.x[i] = this.config.rng() * (w + windOffset * 2) - windOffset;
                 this.y[i] = -50 - this.config.rng() * 50;
                 
@@ -95,14 +106,14 @@ export class SnowEngine {
                 this.driftPhase[i] = this.config.rng() * TAU;
                 this.driftSpeed[i] = this.config.driftFreq + (this.config.rng() - 0.5) * 0.5;
 
-                if (++spawned >= targetSpawns) return;
+                if (++spawned >= cap) return;
             }
         }
     }
 
     updateAndDraw(ctx, dt, w, h) {
         if (this._destroyed) return;
-        if (dt > 0.1) dt = 0.1;
+        dt = this._sane(dt, w, h); if (dt < 0) return;
         this._elapsedTime += dt;
         const invMeltMax = 1.0 / this.config.meltTimeMax;
 
@@ -117,7 +128,7 @@ export class SnowEngine {
                 this.y[i] += this.gz[i] * dt; 
 
                 // Off-screen culling (X-axis wind leak AND Y-axis negative gravity leak)
-                if (this.x[i] < -200 || this.x[i] > w + 200 || this.y[i] < -200) {
+                if (!(this.x[i] >= -200 && this.x[i] <= w + 200 && this.y[i] >= -200)) {
                     this.state[i] = 0;
                     continue;
                 }

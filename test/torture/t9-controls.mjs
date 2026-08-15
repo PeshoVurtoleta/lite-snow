@@ -5,11 +5,10 @@
  * corresponding gate flags each one. If a control slips through, T9 itself fails
  * the run -- a gate that cannot fail is decorative.
  *
- * S0 SCOPE: only the gates that EXIST in S0 have controls here. The remaining
- * controls from roadmap section 3 arrive with the gates they guard:
+ * Controls 3 and 4 (S1) run the pre-fix engine variants in process and prove the
+ * fail-closed door's two gates bite. The remaining controls from roadmap section
+ * 3 arrive with the gates they guard:
  *   - control 2 (T5 oracle divergence)          -> S3 (T5 fuzz)
- *   - control 3 (dt door reverted fails SN-01)   -> S1
- *   - control 4 (spawn cap reverted fails T0)    -> S1
  *   - control 5 (melt batching removed fails T2) -> S3
  *   - control 7 (clear skips _elapsedTime)       -> S2
  *   - control 8 (destroy order inverted)         -> S2
@@ -21,7 +20,12 @@
  */
 
 import { SnowEngine } from '../../SnowEngine.js';
-import { SEED, makeRng, runOpsGate, conservation, occupancy, die, makeMockCtx } from './harness.mjs';
+import {
+    SEED, makeRng, runOpsGate, conservation, occupancy, die, makeMockCtx,
+    nanDtSurvived, spawnBoundHolds,
+} from './harness.mjs';
+
+const TAU = Math.PI * 2; // control-4's frozen v1.0.1 spawn body reads TAU
 
 /** Retained sink so the control's allocations survive GC (arrayBuffers grows). */
 const leak = [];
@@ -37,6 +41,74 @@ export function run() {
         die('T9 control 1: an allocating hot loop passed the zero-alloc gate');
     }
     leak.length = 0; // release the control's garbage
+
+    // Control 3 -- the dt door. A SnowEngine whose _sane is reverted to the
+    // v1.0.1 comparison guard (dt > 0.1 ? 0.1 : dt) does NOT reject a NaN dt, so
+    // nanDtSurvived must return false for it and true for the fixed engine. Both
+    // subclass and instance live INSIDE run() so a second _sane receiver shape
+    // never reaches the measured T6 lane and deopts it.
+    class RevertedDoorEngine extends SnowEngine {
+        _sane(dt, w, h) { return dt > 0.1 ? 0.1 : dt; } // verbatim v1.0.1 guard
+    }
+    if (nanDtSurvived(new RevertedDoorEngine(200, { density: 100, rng: makeRng(SEED) }), makeMockCtx())) {
+        die('T9 control 3: the reverted v1.0.1 dt guard survived a NaN dt -- the SN-01 gate cannot fail');
+    }
+    if (!nanDtSurvived(new SnowEngine(200, { density: 100, rng: makeRng(SEED) }), makeMockCtx())) {
+        die('T9 control 3: the fixed engine failed nanDtSurvived -- the SN-01 gate passes for the wrong reason');
+    }
+
+    // Control 4 -- the spawn cap. A SnowEngine whose spawn is a FROZEN VERBATIM
+    // COPY of the v1.0.1 body overfills the pool on a NaN w, so spawnBoundHolds
+    // must return false for it and true for the fixed engine.
+    class RevertedCapEngine extends SnowEngine {
+        // FROZEN v1.0.1 COPY -- never update this to track the engine.
+        spawn(dt, w, h) {
+            if (this._destroyed) return;
+            if (dt > 0.1) dt = 0.1;
+
+            // Only recompute area modifier on dimension change
+            if (this._lastW !== w || this._lastH !== h) {
+                this._lastW = w;
+                this._lastH = h;
+                this._areaModifier = (w * h) / 100000;
+            }
+
+            const targetSpawns = Math.floor(this._areaModifier * this.config.density * (dt * 60));
+            let spawned = 0;
+            if (targetSpawns <= 0) return;
+
+            for (let i = 0; i < this.max; i++) {
+                if (this.state[i] === 0) {
+                    this.state[i] = 1;
+
+                    const windOffset = (h / this.config.gravity) * Math.abs(this.config.wind);
+                    this.x[i] = this.config.rng() * (w + windOffset * 2) - windOffset;
+                    this.y[i] = -50 - this.config.rng() * 50;
+
+                    this.z[i] = 0.2 + this.config.rng() * 0.8;
+
+                    this.gz[i] = this.config.gravity * this.z[i];
+                    this.wz[i] = this.config.wind * this.z[i];
+
+                    const jitter = (this.config.rng() - 0.5) * 0.8;
+                    this.radius[i] = (this.config.baseRadius + jitter) * this.z[i];
+                    this.driftAmp[i] = this.config.driftAmplitude * this.z[i];
+
+                    this.bucket[i] = this.z[i] < 0.4 ? 0 : this.z[i] < 0.7 ? 1 : 2;
+                    this.driftPhase[i] = this.config.rng() * TAU;
+                    this.driftSpeed[i] = this.config.driftFreq + (this.config.rng() - 0.5) * 0.5;
+
+                    if (++spawned >= targetSpawns) return;
+                }
+            }
+        }
+    }
+    if (spawnBoundHolds(new RevertedCapEngine(10000, { density: 100, rng: makeRng(SEED) }), 0.016, NaN, 600)) {
+        die('T9 control 4: the reverted v1.0.1 spawn respected the bound on NaN w -- the SN-02 gate cannot fail');
+    }
+    if (!spawnBoundHolds(new SnowEngine(10000, { density: 100, rng: makeRng(SEED) }), 0.016, NaN, 600)) {
+        die('T9 control 4: the fixed engine violated the spawn bound -- the SN-02 gate passes for the wrong reason');
+    }
 
     // Control 6 -- the conservation checker. Prove it is BOTH sound on a valid
     // pool and able to flag a corrupted state. A checker that never fails is

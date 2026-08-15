@@ -10,7 +10,7 @@
 ![Dependencies](https://img.shields.io/badge/dependencies-1-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 
-Zero-GC SoA environmental snow engine with drift physics, Z-depth parallax, ellipse accumulation, and bucketed rendering. One dependency. 3 presets. 198 lines.
+Zero-GC SoA environmental snow engine with drift physics, Z-depth parallax, ellipse accumulation, and bucketed rendering. One dependency. 3 presets. 213 lines.
 
 ## Live Demo
 https://cdpn.io/pen/debug/yyapJqB
@@ -21,13 +21,13 @@ https://cdpn.io/pen/debug/yyapJqB
 |---|---|---|---|---|
 | **Zero-GC hot path** | **Yes** | No | No | No |
 | **SoA flat arrays** | **12 arrays** | No | No | No |
-| **Z-depth parallax** | **Yes (0.2–1.0)** | No | No | Manual |
+| **Z-depth parallax** | **Yes (0.2-1.0)** | No | No | Manual |
 | **Sinusoidal drift** | **Per-flake** | Partial | No | Manual |
 | **Melt accumulation** | **Ellipse morph** | No | No | No |
 | **Bucketed rendering** | **3 tiers** | No | No | No |
 | **Built-in presets** | **3** | Config-heavy | No | No |
 | **OKLCH color** | **Yes** | No | No | No |
-| **Bundle size** | **< 2KB** | ~40KB | ~10KB | ~800KB |
+| **Bundle size** | **2.0KB gzipped** | ~40KB | ~10KB | ~800KB |
 
 ## Installation
 
@@ -89,17 +89,17 @@ const blizzard = new SnowEngine(15000, SNOW_PRESETS.blizzard);
 
 ### Phase 1: Falling Flake (state = 1)
 
-Snowflakes spawn above the viewport with random Z-depth (0.2–1.0). Every parameter scales by Z:
+Snowflakes spawn above the viewport with random Z-depth (0.2-1.0). Every parameter scales by Z:
 
 | Property | Formula | Effect |
 |---|---|---|
 | Fall speed | `gravity × z` | Far flakes fall slower |
 | Wind drift | `wind × z` | Far flakes drift less |
-| Flake radius | `(baseRadius ± jitter) × z` | Far flakes are smaller |
+| Flake radius | `(baseRadius +/- jitter) × z` | Far flakes are smaller |
 | Drift amplitude | `driftAmplitude × z` | Far flakes sway less |
 | Render alpha | `z × 0.8` | Far flakes are faint |
 
-Each flake has a unique **sinusoidal drift** — a sine wave with per-flake random phase, frequency, and amplitude. This produces the natural floating-leaf motion that makes snow look real instead of just falling vertically.
+Each flake has a unique **sinusoidal drift** -- a sine wave with per-flake random phase, frequency, and amplitude. This produces the natural floating-leaf motion that makes snow look real instead of just falling vertically.
 
 All Z-dependent values are **precomputed at spawn**: `gz[]`, `wz[]`, `radius[]`, `driftAmp[]`, `bucket[]`.
 
@@ -107,11 +107,11 @@ All Z-dependent values are **precomputed at spawn**: `gz[]`, `wz[]`, `radius[]`,
 
 When a flake reaches the floor (`y >= h`), it transitions to a settled state:
 
-- **Shape morphs** from a circle to a flat **ellipse** (2.5× width, 0.5× height) — simulating a flake flattening on the ground
+- **Shape morphs** from a circle to a flat **ellipse** (2.5× width, 0.5× height) -- simulating a flake flattening on the ground
 - **Alpha fades** from `z` to 0 over `meltTimeMin` to `meltTimeMax` seconds
 - Computed via `invMeltMax` (one division per frame, not per flake)
 
-This creates a subtle accumulation layer at the bottom of the canvas — flakes don't just disappear, they settle and melt.
+This creates a subtle accumulation layer at the bottom of the canvas -- flakes don't just disappear, they settle and melt.
 
 ### Bucketed Rendering
 
@@ -119,11 +119,11 @@ Flakes are binned into 3 depth tiers at spawn:
 
 | Bucket | Z Range | Alpha | Radius Scale |
 |---|---|---|---|
-| 0 (far) | 0.2–0.4 | 0.24 | ~0.3× |
-| 1 (mid) | 0.4–0.7 | 0.44 | ~0.55× |
-| 2 (near) | 0.7–1.0 | 0.72 | ~0.9× |
+| 0 (far) | 0.2-0.4 | 0.24 | ~0.3× |
+| 1 (mid) | 0.4-0.7 | 0.44 | ~0.55× |
+| 2 (near) | 0.7-1.0 | 0.72 | ~0.9× |
 
-Each bucket renders in **one batched `ctx.fill()` call** — 3 draw calls for all 10,000 flakes.
+Each bucket renders in **one batched `ctx.fill()` call** -- 3 draw calls for all 10,000 flakes.
 
 ---
 
@@ -133,12 +133,12 @@ All config values are live-mutable between frames.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `gravity` | number | 40 | Downward acceleration (px/s²). Snow is very light. |
+| `gravity` | number | 40 | Downward acceleration (px/s^2). Snow is very light. |
 | `wind` | number | 30 | Horizontal wind (px/s). Positive = right. |
 | `density` | number | 10.0 | Spawn multiplier. Auto-scales with canvas area. |
 | `baseRadius` | number | 2.5 | Base flake radius (px). Depth-scaled per flake. |
 | `driftAmplitude` | number | 15 | Horizontal drift sine amplitude (px). Depth-scaled. |
-| `driftFreq` | number | 1.0 | Drift sine frequency (Hz). Per-flake jitter ±0.25. |
+| `driftFreq` | number | 1.0 | Drift sine frequency (Hz). Per-flake jitter +/-0.25. |
 | `meltTimeMin` | number | 2.0 | Minimum time before settled flake fades (seconds). |
 | `meltTimeMax` | number | 5.0 | Maximum melt time (seconds). |
 | `color` | OklchColor \| string | `'oklch(0.98 0.02 250)'` | Flake color. Pre-parsed at construction. |
@@ -195,7 +195,7 @@ const snow = new SnowEngine(10000, { rng: () => rng.next() });
 ## Recipes
 
 <details>
-<summary><strong>❄️ Gentle Window Scene</strong></summary>
+<summary><strong>Gentle Window Scene</strong></summary>
 
 ```javascript
 import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
@@ -209,7 +209,7 @@ const snow = new SnowEngine(8000, {
 </details>
 
 <details>
-<summary><strong>🌨️ Heavy Snowfall</strong></summary>
+<summary><strong>Heavy Snowfall</strong></summary>
 
 ```javascript
 const snow = new SnowEngine(12000, SNOW_PRESETS.heavy);
@@ -218,7 +218,7 @@ const snow = new SnowEngine(12000, SNOW_PRESETS.heavy);
 </details>
 
 <details>
-<summary><strong>🌬️ Blizzard with Dynamic Wind</strong></summary>
+<summary><strong>Blizzard with Dynamic Wind</strong></summary>
 
 ```javascript
 const snow = new SnowEngine(15000, SNOW_PRESETS.blizzard);
@@ -236,7 +236,7 @@ snow.config.wind += (windTarget - snow.config.wind) * dt * 1.5;
 </details>
 
 <details>
-<summary><strong>🎮 Game Scene Overlay</strong></summary>
+<summary><strong>Game Scene Overlay</strong></summary>
 
 ```javascript
 function gameLoop(dt) {
@@ -254,7 +254,7 @@ function gameLoop(dt) {
 </details>
 
 <details>
-<summary><strong>🎨 Colored Snow (Ash, Cherry Blossoms, Embers)</strong></summary>
+<summary><strong>Colored Snow (Ash, Cherry Blossoms, Embers)</strong></summary>
 
 ```javascript
 // Volcanic ash
@@ -285,7 +285,7 @@ const embers = new SnowEngine(3000, {
 </details>
 
 <details>
-<summary><strong>🔀 Combined with Rain + Fireworks</strong></summary>
+<summary><strong>Combined with Rain + Fireworks</strong></summary>
 
 ```javascript
 import { SnowEngine } from '@zakkster/lite-snow';
@@ -311,7 +311,7 @@ function loop(time) {
 </details>
 
 <details>
-<summary><strong>🎛️ Live Config Panel</strong></summary>
+<summary><strong>Live Config Panel</strong></summary>
 
 ```javascript
 windSlider.oninput = () => snow.config.wind = +windSlider.value;
@@ -349,6 +349,28 @@ driftSlider.oninput = () => snow.config.driftAmplitude = +driftSlider.value;
 | `.flurry` | Gentle snowfall |
 | `.heavy` | Dense, windy |
 | `.blizzard` | Extreme whiteout |
+
+### Fail-closed frames
+
+`spawn()` and `updateAndDraw()` validate `dt`, `w` and `h` once per call, before
+touching any state. A frame the engine cannot trust is a frame it does not run:
+
+| Input | Behaviour |
+|---|---|
+| `dt` non-finite (`NaN`, `Infinity`) or negative | no-op frame |
+| `dt` greater than `0.1` | clamped to `0.1` |
+| `dt` of `0` | runs; no motion, still renders |
+| `w` or `h` non-finite or `<= 0` | no-op frame |
+
+A no-op frame advances no clock, touches no particle, and draws nothing -- the
+canvas keeps whatever was last drawn, so a dropped frame reads as a held frame
+rather than a blank one. Nothing is substituted for a rejected `dt`: a default
+value would fabricate motion you did not ask for.
+
+This matters most with `requestAnimationFrame` on the first tick, after a
+backgrounded tab, or on a canvas that has not been laid out yet -- all of which
+can hand you a `NaN` or `0`. Before `1.0.2` those inputs corrupted the pool
+permanently.
 
 ---
 
