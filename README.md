@@ -333,14 +333,44 @@ driftSlider.oninput = () => snow.config.driftAmplitude = +driftSlider.value;
 | `maxParticles` | number | 10000 | Pool capacity. Shared between flakes and melting. |
 | `config` | SnowConfig | see above | All options. Live-mutable. |
 
+Both are validated at construction and throw a `RangeError` naming the value:
+
+| Input | Rule |
+|---|---|
+| `maxParticles` | integer, `1 <= n <= 10000000` |
+| `baseRadius` | finite, `> 0` |
+
+**Sizing.** The pool costs **42 bytes per particle** -- ten `Float32Array`
+columns at 4 bytes plus two `Uint8Array` columns at 1 byte. The default 10000
+slots are 420 KB; the 10000000 ceiling is 420 MB. The ceiling exists so a typo
+fails loudly instead of attempting a multi-gigabyte allocation.
+
 ### Methods
 
 | Method | Description |
 |---|---|
 | `.spawn(dt, w, h)` | Spawn new flakes. Auto-scales with area × density. |
 | `.updateAndDraw(ctx, dt, w, h)` | Physics + render. Does **not** clear canvas. |
-| `.clear()` | Kill all particles immediately. |
-| `.destroy()` | Null all 12 typed arrays. Idempotent. |
+| `.clear()` | Full simulation reset: kills all particles, zeroes the drift clock, and invalidates the dimension cache. |
+| `.destroy()` | Nulls the 12 typed arrays, the config and the bucket table. Idempotent. |
+
+### Telemetry
+
+| Getter | Description |
+|---|---|
+| `.fallingCount` | Flakes in the falling phase (`state = 1`). |
+| `.meltingCount` | Flakes in the melt phase (`state = 2`). |
+| `.activeCount` | Sum of the two -- pool occupancy. |
+
+All three are O(1) integer reads maintained by the existing state transitions,
+not scans. Use `activeCount / maxParticles` to see how close the pool is to
+saturation; a pool pinned at capacity means `density` is outrunning the melt
+rate and new flakes are being silently dropped.
+
+Because they are maintained rather than counted, **writing `state[i]` directly
+desynchronises them.** The twelve SoA columns are public and you may read them
+freely, but a slot's state is the engine's to change: go through `spawn()`,
+`clear()` or the melt lifecycle. `clear()` resynchronises from scratch.
 
 ### `SNOW_PRESETS`
 
@@ -349,6 +379,10 @@ driftSlider.oninput = () => snow.config.driftAmplitude = +driftSlider.value;
 | `.flurry` | Gentle snowfall |
 | `.heavy` | Dense, windy |
 | `.blizzard` | Extreme whiteout |
+
+The table and every preset object are frozen. Spread a preset to customise it
+(`{ ...SNOW_PRESETS.heavy, wind: 40 }`) -- assigning into one would otherwise
+reconfigure every engine built from it afterwards.
 
 ### Fail-closed frames
 
@@ -361,6 +395,7 @@ touching any state. A frame the engine cannot trust is a frame it does not run:
 | `dt` greater than `0.1` | clamped to `0.1` |
 | `dt` of `0` | runs; no motion, still renders |
 | `w` or `h` non-finite or `<= 0` | no-op frame |
+| `ctx` null, or missing `arc` / `ellipse` | no-op frame |
 
 A no-op frame advances no clock, touches no particle, and draws nothing -- the
 canvas keeps whatever was last drawn, so a dropped frame reads as a held frame
@@ -371,6 +406,12 @@ This matters most with `requestAnimationFrame` on the first tick, after a
 backgrounded tab, or on a canvas that has not been laid out yet -- all of which
 can hand you a `NaN` or `0`. Before `1.0.2` those inputs corrupted the pool
 permanently.
+
+**If a draw call throws** -- a lost context, a canvas that goes away mid-frame --
+the engine restores `ctx.globalAlpha` to `1.0` and rethrows. It does not swallow
+the error, and it does not leave your subsequent drawing translucent at whatever
+depth alpha it happened to be using. Physics has already settled by then, so the
+engine is intact and the next frame renders normally.
 
 ---
 

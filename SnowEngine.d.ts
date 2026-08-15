@@ -30,6 +30,13 @@ export declare class SnowEngine {
     config: Required<SnowConfig>;
     colorStr: string;
 
+    /** Live falling-flake count (state === 1). O(1) telemetry getter. @readonly */
+    readonly fallingCount: number;
+    /** Live melting-flake count (state === 2). O(1) telemetry getter. @readonly */
+    readonly meltingCount: number;
+    /** fallingCount + meltingCount. O(1) telemetry getter. @readonly */
+    readonly activeCount: number;
+
     x: Float32Array | null;
     y: Float32Array | null;
     z: Float32Array | null;
@@ -56,6 +63,11 @@ export declare class SnowEngine {
     /** Three depth-tier render descriptors { id, zAvg }. @internal */
     _buckets: Array<{ id: number; zAvg: number }>;
 
+    /**
+     * @throws {RangeError} if maxParticles is not an integer in 1..10000000, or
+     * if config.baseRadius is not a finite number greater than 0. The guards run
+     * before any typed array is allocated.
+     */
     constructor(maxParticles?: number, config?: SnowConfig);
 
     /**
@@ -79,13 +91,21 @@ export declare class SnowEngine {
      * Call spawn() before this each frame.
      * A non-finite or negative dt, or a non-positive/non-finite w/h, is a
      * documented no-op frame: the clock does not advance and no state is touched.
+     * A null ctx, or one without arc()/ellipse(), is likewise a no-op frame. A
+     * draw call that throws mid-render restores globalAlpha to 1.0 and RETHROWS.
      */
     updateAndDraw(ctx: CanvasRenderingContext2D, dt: number, w: number, h: number): void;
 
-    /** Kill all particles immediately. */
+    /**
+     * Full simulation reset: empties the pool and resets the clock, the dimension
+     * cache and the telemetry counters to their fresh-construction values.
+     */
     clear(): void;
 
-    /** Release all typed arrays. Idempotent. */
+    /**
+     * Release all typed arrays and the config, colorStr and _buckets references.
+     * Runs clear() first, so the clock and counters are zeroed. Idempotent.
+     */
     destroy(): void;
 }
 

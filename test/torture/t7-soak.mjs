@@ -15,7 +15,7 @@
 
 import { SnowEngine } from '../../SnowEngine.js';
 import { createLeakTracker } from '@zakkster/lite-leak';
-import { SEED, makeRng, check, conservation, occupancy, makeMockCtx } from './harness.mjs';
+import { SEED, makeRng, check, conservation, countersAgree, occupancy, makeMockCtx } from './harness.mjs';
 
 const CYCLES = 4096;
 const MAX = 256;
@@ -62,6 +62,7 @@ export function run() {
 
         // Conservation and finiteness while the pool is full.
         check(conservation(engine), () => `T7: cycle ${c} conservation violated after fill`);
+        check(countersAgree(engine), () => `T7: cycle ${c} counters disagree after fill`);
         for (let i = 0; i < MAX; i++) {
             if (engine.state[i] !== 0) {
                 check(Number.isFinite(engine.x[i]) && Number.isFinite(engine.y[i]),
@@ -96,6 +97,7 @@ export function run() {
         check(occ.free === engine.max,
             () => `T7: cycle ${c} drain incomplete -- occupancy free=${occ.free} != max=${engine.max} (falling=${occ.falling} melting=${occ.melting})`);
         check(conservation(engine), () => `T7: cycle ${c} conservation violated after drain`);
+        check(countersAgree(engine), () => `T7: cycle ${c} counters disagree after drain`);
     }
 
     check(tracker.size() === 0, () => `T7: lite-leak tracker leaked ${tracker.size()} resources`);

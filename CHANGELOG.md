@@ -3,6 +3,137 @@
 All notable changes to `@zakkster/lite-snow` are documented here. The format
 follows Keep a Changelog, and the project adheres to Semantic Versioning.
 
+## [1.0.3] - 2026-08-15
+
+Session S2. S1 shut the per-frame door; this shuts the per-object one --
+construction, destruction, the shared preset table, and the fact that a caller
+could not see how full the pool was.
+
+### Fixed
+
+- **SN-15 -- `maxParticles` is validated instead of trusted.** Must be an
+  integer in `1..10000000`; anything else throws a `RangeError` naming the
+  value. `new SnowEngine(0)` used to build a dead engine that silently spawned
+  nothing, `2.5` truncated to a two-slot pool, and `1e9` attempted a 42 GB
+  allocation and died inside the typed-array allocator. The ceiling is stated
+  in bytes: the pool costs 42 bytes per particle, so 10000000 is 420 MB.
+- **SN-07 -- a negative flake radius can no longer reach `ctx.arc`.** Both ends
+  are closed, because `config` is live-mutable and a constructor check alone is
+  not sufficient: `baseRadius` must be finite and `> 0` at construction, and the
+  jittered per-flake radius is clamped to `MIN_RADIUS` (0.01) at spawn. A
+  `baseRadius` under 0.4 could previously produce a negative radius, and
+  `ctx.arc` throws `IndexSizeError` from inside the bucket loop -- leaving the
+  path open and `globalAlpha` at the bucket value.
+- **SN-10 -- a throwing draw call no longer corrupts the caller's canvas
+  state.** `ctx` is validated once per frame, above the clock write, and a
+  missing or malformed context is a no-op frame on the same terms as a bad `dt`.
+  The render section is wrapped so `ctx.globalAlpha = 1.0` always runs. The
+  error is **rethrown**, not swallowed. Physics settles before the render
+  section opens, so a mid-frame throw leaves the engine intact and the next
+  frame renders normally.
+- **SN-09 -- `destroy()`'s `clear()` was dead code.** The old order set
+  `_destroyed = true` and then called `clear()`, whose first line returns when
+  that flag is set, so `state.fill(0)` never executed. Harmless only because the
+  next line nulled `state` -- invisible, and live the moment a step appeared
+  between them. `clear()` now runs first. `destroy()` also releases `config`,
+  `colorStr` and `_buckets`, so a destroyed engine retains nothing but its flag.
+- **SN-17 -- `clear()` is a full simulation reset.** It now zeroes
+  `_elapsedTime` and invalidates the dimension cache
+  (`_lastW`, `_lastH`, `_areaModifier`) as well as the pool. A cleared engine
+  previously resumed mid-sine and kept a stale area modifier until the canvas
+  dimensions happened to change again.
+- **SN-16 -- `SNOW_PRESETS` and every preset object are frozen.** The README and
+  the test suite both spread presets into constructors; one assignment into a
+  preset silently reconfigured every engine built from it afterwards.
+- **SN-32 -- the spawn cap no longer wraps at int32.** S1 trapped NaN with
+  `Math.floor(...) | 0` and accepted the int32 coercion knowingly. It is now a
+  clamp, which traps NaN identically (`NaN > 0` is false) and cannot wrap.
+  Additionally guarded with `Number.isFinite`: without it, `density: Infinity`
+  drives the raw cap to `Infinity`, which is greater than `max`, so the clamp
+  would fill the entire pool in one call -- an SN-02 regression through a config
+  path the frame door does not validate.
+
+### Added
+
+- **SN-18 -- pool telemetry.** `fallingCount`, `meltingCount` and `activeCount`
+  as O(1) integer reads maintained by the four existing state transitions. No
+  new scan, no new branch, no new loop. This is what makes SN-02-class overfill
+  observable from outside, which is why it went a whole release unseen.
+- Torture T2 (canvas-state contract) and T4 (lifecycle and hostile input),
+  previously empty placeholders.
+- Harness predicates `countersAgree`, `clearIsFullReset`, `destroyReleasesAll`
+  and `spawnCapNoWrap`, shared by T1, T4, T7 and the T9 controls so a law and
+  its control exercise one implementation.
+- T9 controls 7-10: a `clear()` that skips the clock, a `destroy()` re-inverted
+  to the frozen 1.0.2 body, a frozen `| 0` spawn cap, and a counter oracle.
+  Each asserts both that the broken variant is caught and that the fixed engine
+  is not, so none can pass for the wrong reason.
+
+### Breaking for misuse
+
+Two inputs that used to be accepted now throw. Neither was ever documented as
+supported, but both are observable behaviour changes:
+
+- `new SnowEngine(2.5)` (or `0`, `-1`, `NaN`, `Infinity`, `1e9`, `'100'`) now
+  throws a `RangeError` instead of silently truncating or dying in the
+  allocator.
+- `SNOW_PRESETS.flurry.density = 999` now throws a `TypeError` in strict mode
+  (ESM is always strict) instead of succeeding.
+
+### Performance
+
+The only hot-body change is SN-18's four counter updates at three existing
+transition sites in the physics loop. The render section gained a `try` and a
+`finally` around it and **zero** per-particle statements. Measured on the 60%
+occupancy lane, 2000-slot pool, 20000 ops after 2000 warmup, seven trials per
+run, five runs per build, uncontended:
+
+    v1.0.2  41810 ns/frame (median of run medians)
+    v1.0.3  41735 ns/frame (median of run medians)
+    delta   -0.18%, inside run-to-run noise
+
+**Methodology note, because it changed the answer.** Measuring the two builds in
+blocks -- all of 1.0.2, then all of 1.0.3 -- reported +1.8%, which would have
+tripped the budget and reverted the counters. Interleaving the runs in
+alternating pairs reported -0.18%. In the interleaved data 1.0.2's own spread
+(41197..43008) is *wider* than 1.0.3's (41592..42690), so the block-ordered
+figure was measuring drift across the run, not the diff. Interleave, or do not
+claim a sub-1% delta.
+
+### Changed
+
+- 38 unit tests across 6 suites, up from 31 across 5.
+- `MockCtx.arc()` and `.ellipse()` now throw `IndexSizeError` on a negative
+  radius, exactly as a real `CanvasRenderingContext2D` does. Without this the
+  mock silently accepted geometry a real canvas refuses, which made "a full
+  frame does not throw" an assertion about the mock rather than about the
+  engine.
+
+### Notes
+
+A fourteen-mutation matrix was run against this release. Two mutations survived
+the first pass, both genuine coverage holes rather than benign redundancy, and
+both are now closed. They are recorded because each is a *class* of mistake, not
+a one-off:
+
+- **The SN-07 regression test was vacuous.** It asserted every live flake's
+  radius was positive, but did so *after* a frame -- and its own
+  `rng: () => 0` places every flake at `x = -windOffset = -450`, which S1's
+  positive-liveness cull kills on that first frame. The assertion looped over an
+  empty pool and passed no matter what the engine did; deleting the radius clamp
+  outright survived it. The check now runs on the pool the spawn produced and
+  pins the live count first, so it cannot go vacuous again. A test whose
+  assertion sits inside a conditional needs a proof that the conditional fires.
+- **The cull transition's counter decrement was never exercised.** The counter
+  suite used high gravity, so every flake *settled*; nothing walked off-screen,
+  so the `1 -> 0` cull path ran with no counter assertion watching and deleting
+  its decrement survived. A dedicated high-wind case now forces pure culls with
+  no settles, and asserts a cull actually happened. This is the same shape as
+  the S1 hole where the `y >= -200` term was never exercised: the transition
+  every fixture happens not to reach is the one nothing is asserting on.
+
+After both fixes, all fourteen mutations are caught.
+
 ## [1.0.2] - 2026-08-15
 
 Session S1. Closes the five silent-corruption paths that were reproducible in
@@ -188,5 +319,6 @@ non-fatal known-issue reproductions so they are visible on every run.
   Repro: `e.spawn(0.016,800,600); e.updateAndDraw(ctx,-1,800,600)` ->
   `e._elapsedTime` is negative and the live count drops.
 
+[1.0.3]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.0.3
 [1.0.2]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.0.2
 [1.0.1]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.0.1

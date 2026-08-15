@@ -1,18 +1,23 @@
 /**
- * @zakkster/lite-snow v1.0.2
+ * @zakkster/lite-snow v1.0.3
  * Zero-GC, SoA Environmental Snow Engine
  * Drift physics, Z-depth parallax, ellipse accumulation, bucketed rendering, 3 presets.
  */
 
 import { toCssOklch } from '@zakkster/lite-color';
 
-export const VERSION = '1.0.2';
+export const VERSION = '1.0.3';
 
 const TAU = Math.PI * 2;
 const DT_MAX = 0.1;
+const MAX_PARTICLES = 10000000;
+const MIN_RADIUS = 0.01;
 
 export class SnowEngine {
     constructor(maxParticles = 10000, config = {}) {
+        if (!Number.isInteger(maxParticles) || maxParticles < 1 || maxParticles > MAX_PARTICLES) {
+            throw new RangeError('lite-snow: maxParticles must be an integer 1..10000000, got ' + String(maxParticles));
+        }
         this.max = maxParticles;
         this.config = {
             gravity: 40,          
@@ -27,6 +32,10 @@ export class SnowEngine {
             rng: Math.random,     
             ...config
         };
+
+        if (!Number.isFinite(this.config.baseRadius) || this.config.baseRadius <= 0) {
+            throw new RangeError('lite-snow: baseRadius must be a finite number > 0, got ' + String(this.config.baseRadius));
+        }
 
         this.colorStr = typeof this.config.color === 'string' ? this.config.color : toCssOklch(this.config.color);
 
@@ -46,9 +55,11 @@ export class SnowEngine {
         this.state = new Uint8Array(this.max);  
         
         this._elapsedTime = 0;
+        this._nFalling = 0;
+        this._nMelting = 0;
         this._destroyed = false;
-        
-        // Dimension cache — recompute only on size change
+
+        // Dimension cache -- recompute only on size change
         this._lastW = 0;
         this._lastH = 0;
         this._areaModifier = 0;
@@ -79,7 +90,8 @@ export class SnowEngine {
             this._areaModifier = (w * h) / 100000;
         }
 
-        const cap = Math.floor(this._areaModifier * this.config.density * (dt * 60)) | 0;
+        const raw = Math.floor(this._areaModifier * this.config.density * (dt * 60));
+        const cap = Number.isFinite(raw) && raw > 0 ? (raw > this.max ? this.max : raw) : 0;
         if (cap <= 0) return;
         const g = this.config.gravity;
         let windOffset = g === 0 ? 0 : (h / g) * Math.abs(this.config.wind);
@@ -89,6 +101,7 @@ export class SnowEngine {
         for (let i = 0; i < this.max; i++) {
             if (this.state[i] === 0) {
                 this.state[i] = 1;
+                this._nFalling++;
 
                 this.x[i] = this.config.rng() * (w + windOffset * 2) - windOffset;
                 this.y[i] = -50 - this.config.rng() * 50;
@@ -99,7 +112,8 @@ export class SnowEngine {
                 this.wz[i] = this.config.wind * this.z[i];
                 
                 const jitter = (this.config.rng() - 0.5) * 0.8;
-                this.radius[i] = (this.config.baseRadius + jitter) * this.z[i];
+                const r = (this.config.baseRadius + jitter) * this.z[i];
+                this.radius[i] = r > MIN_RADIUS ? r : MIN_RADIUS;
                 this.driftAmp[i] = this.config.driftAmplitude * this.z[i];
                 
                 this.bucket[i] = this.z[i] < 0.4 ? 0 : this.z[i] < 0.7 ? 1 : 2;
@@ -113,6 +127,7 @@ export class SnowEngine {
 
     updateAndDraw(ctx, dt, w, h) {
         if (this._destroyed) return;
+        if (!ctx || typeof ctx.ellipse !== 'function' || typeof ctx.arc !== 'function') return;
         dt = this._sane(dt, w, h); if (dt < 0) return;
         this._elapsedTime += dt;
         const invMeltMax = 1.0 / this.config.meltTimeMax;
@@ -130,85 +145,100 @@ export class SnowEngine {
                 // Off-screen culling (X-axis wind leak AND Y-axis negative gravity leak)
                 if (!(this.x[i] >= -200 && this.x[i] <= w + 200 && this.y[i] >= -200)) {
                     this.state[i] = 0;
+                    this._nFalling--;
                     continue;
                 }
 
                 if (this.y[i] >= h) {
-                    this.y[i] = h; 
-                    this.state[i] = 2; 
+                    this.y[i] = h;
+                    this.state[i] = 2;
+                    this._nFalling--; this._nMelting++;
                     this.life[i] = this.config.meltTimeMin + this.config.rng() * (this.config.meltTimeMax - this.config.meltTimeMin);
                 }
-            } 
+            }
             else if (this.state[i] === 2) {
                 this.life[i] -= dt;
-                if (this.life[i] <= 0) this.state[i] = 0; 
+                if (this.life[i] <= 0) { this.state[i] = 0; this._nMelting--; }
             }
         }
 
         // --- 2. BUCKETED RENDER PIPELINE ---
-        ctx.fillStyle = this.colorStr;
+        try {
+            ctx.fillStyle = this.colorStr;
 
-        for (const bucket of this._buckets) {
-            ctx.globalAlpha = bucket.zAvg * 0.8; 
-            ctx.beginPath(); 
-            for (let i = 0; i < this.max; i++) {
-                if (this.state[i] === 1 && this.bucket[i] === bucket.id) {
-                    ctx.moveTo(this.x[i] + this.radius[i], this.y[i]);
-                    ctx.arc(this.x[i], this.y[i], this.radius[i], 0, TAU);
-                }
-            }
-            ctx.fill(); 
-        }
-
-        for (let i = 0; i < this.max; i++) {
-            if (this.state[i] === 2) {
-                ctx.globalAlpha = (this.life[i] * invMeltMax) * this.z[i]; 
+            for (const bucket of this._buckets) {
+                ctx.globalAlpha = bucket.zAvg * 0.8;
                 ctx.beginPath();
-                ctx.ellipse(this.x[i], this.y[i], this.radius[i] * 2.5, this.radius[i] * 0.5, 0, 0, TAU);
+                for (let i = 0; i < this.max; i++) {
+                    if (this.state[i] === 1 && this.bucket[i] === bucket.id) {
+                        ctx.moveTo(this.x[i] + this.radius[i], this.y[i]);
+                        ctx.arc(this.x[i], this.y[i], this.radius[i], 0, TAU);
+                    }
+                }
                 ctx.fill();
             }
+
+            for (let i = 0; i < this.max; i++) {
+                if (this.state[i] === 2) {
+                    ctx.globalAlpha = (this.life[i] * invMeltMax) * this.z[i];
+                    ctx.beginPath();
+                    ctx.ellipse(this.x[i], this.y[i], this.radius[i] * 2.5, this.radius[i] * 0.5, 0, 0, TAU);
+                    ctx.fill();
+                }
+            }
+        } finally {
+            ctx.globalAlpha = 1.0;
         }
-        
-        ctx.globalAlpha = 1.0;
     }
 
     clear() {
         if (this._destroyed) return;
         this.state.fill(0);
+        this._elapsedTime = 0;
+        this._lastW = 0;
+        this._lastH = 0;
+        this._areaModifier = 0;
+        this._nFalling = 0;
+        this._nMelting = 0;
     }
 
     destroy() {
         if (this._destroyed) return;
-        this._destroyed = true;
         this.clear();
-        this.x = null; this.y = null; this.z = null; this.gz = null; 
-        this.wz = null; this.bucket = null; this.radius = null; 
+        this._destroyed = true;
+        this.x = null; this.y = null; this.z = null; this.gz = null;
+        this.wz = null; this.bucket = null; this.radius = null;
         this.driftPhase = null; this.driftSpeed = null; this.driftAmp = null;
         this.life = null; this.state = null;
+        this.config = null; this.colorStr = null; this._buckets = null;
     }
+
+    get fallingCount() { return this._nFalling; }
+    get meltingCount() { return this._nMelting; }
+    get activeCount() { return this._nFalling + this._nMelting; }
 }
 
 
-export const SNOW_PRESETS = {
-    flurry: {
+export const SNOW_PRESETS = Object.freeze({
+    flurry: Object.freeze({
         density: 10.0,
         wind: 30,
         gravity: 40,
         driftAmplitude: 15,
         baseRadius: 2.5
-    },
-    heavy: {
+    }),
+    heavy: Object.freeze({
         density: 24.0,
         wind: 150,
         gravity: 80,
         driftAmplitude: 25,
         baseRadius: 3.5
-    },
-    blizzard: {
+    }),
+    blizzard: Object.freeze({
         density: 40.0,
         wind: 400,
         gravity: 250,
         driftAmplitude: 50,
         baseRadius: 2.0 // Smaller flakes due to wind shear
-    }
-};
+    })
+});

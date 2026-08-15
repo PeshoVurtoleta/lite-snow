@@ -16,7 +16,7 @@
 import { SnowEngine } from '../../SnowEngine.js';
 import {
     SEED, makeRng, check, note, makeMockCtx,
-    occupancy, conservation, spawnBoundHolds, SOA_NAMES,
+    occupancy, conservation, spawnBoundHolds, spawnCapNoWrap, SOA_NAMES,
 } from './harness.mjs';
 
 const DT_MAX = 0.1; // must mirror SnowEngine.js DT_MAX
@@ -230,6 +230,16 @@ export function run() {
             () => `T1.density: density=${String(densities[k])} overfilled the pool`);
     }
 
+    // --- SN-32: an overflowing raw cap clamps to max, it does not wrap ------
+    // area 1e7 x 5e6, density 10 -> raw = 3e10, which `| 0` would wrap to a
+    // negative and spawn nothing. D7 clamps to min(raw, max), so the 64-slot
+    // pool fills exactly. Fixed in S2 (was a note in S1's territory).
+    {
+        const e = new SnowEngine(64, { density: 10, rng: makeRng(SEED) });
+        check(spawnCapNoWrap(e),
+            () => `T1.SN-32: overflowing raw cap did not fill the 64-slot pool (live=${liveCount(e)})`);
+    }
+
     // ====================================================================
     // Section 3 -- S2's findings (SN-07, SN-15, SN-16). DOCUMENTED, not fixed.
     // note() the observed answer; assert ONLY conservation + no overfill.
@@ -255,7 +265,7 @@ function documentFinding(label, values, cfgFactory) {
         try {
             e = new SnowEngine(100, { density: 100, rng: makeRng(SEED), ...cfgFactory(v) });
         } catch (err) {
-            note(`T1.${label}=${String(v)} threw at construction: ${err && err.message}`);
+            note(`T1.${label}=${String(v)} threw at construction: ${err && err.message} (S2 decided: throws)`);
             continue;
         }
         const held = spawnBoundHolds(e, 0.016, 800, 600);
@@ -313,7 +323,7 @@ function documentMaxParticles(values) {
         try {
             e = new SnowEngine(v, { density: 100, rng: makeRng(SEED) });
         } catch (err) {
-            note(`T1.maxParticles=${String(v)} threw at construction: ${err && err.message} (S2 finding)`);
+            note(`T1.maxParticles=${String(v)} threw at construction: ${err && err.message} (S2 decided: throws)`);
             continue;
         }
         e.spawn(0.016, 800, 600);

@@ -27,16 +27,24 @@ import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 - spawn() and updateAndDraw() separate — caller controls timing
 - Pre-parsed OKLCH color in constructor
 - RNG injectable, no lite-random dep
-- destroy() nulls 12 arrays
+- destroy() nulls the 12 arrays AND releases config, colorStr, _buckets; runs clear() first
 - Fail-closed door: non-finite or negative dt, or w/h <= 0, is a no-op frame (no clock advance, no state touch)
+- 42 bytes/particle: 10 Float32 (x,y,z,gz,wz,radius,driftPhase,driftSpeed,driftAmp,life) + 2 Uint8 (bucket,state)
+- maxParticles ceiling MAX_PARTICLES = 10000000; a non-integer or out-of-range max throws RangeError before allocation
+- baseRadius must be a finite number > 0 or the constructor throws RangeError; radius[] clamped to MIN_RADIUS (0.01)
+- clear() is a full reset: pool, clock, dimension cache and telemetry counters
+- updateAndDraw ctx door: a null ctx or one missing arc()/ellipse() is a no-op frame
+- A draw call that throws mid-render restores globalAlpha to 1.0 and RETHROWS
+- SNOW_PRESETS and each of .flurry/.heavy/.blizzard are Object.frozen
 
 ## API
-- VERSION: '1.0.2'
+- VERSION: '1.0.3'
 - new SnowEngine(maxParticles?, config?)
 - .spawn(dt, w, h) — spawn new flakes
 - .updateAndDraw(ctx, dt, w, h) — physics + render
 - .clear() — kill all
 - .destroy() — release arrays
+- .fallingCount / .meltingCount / .activeCount -- live telemetry getters (O(1))
 
 ## Config
 gravity (40), wind (30), density (10), baseRadius (2.5), driftAmplitude (15),

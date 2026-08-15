@@ -22,10 +22,11 @@
 import { SnowEngine } from '../../SnowEngine.js';
 import {
     SEED, makeRng, runOpsGate, conservation, occupancy, die, makeMockCtx,
-    nanDtSurvived, spawnBoundHolds,
+    nanDtSurvived, spawnBoundHolds, clearIsFullReset, destroyReleasesAll,
+    countersAgree, spawnCapNoWrap,
 } from './harness.mjs';
 
-const TAU = Math.PI * 2; // control-4's frozen v1.0.1 spawn body reads TAU
+const TAU = Math.PI * 2; // the frozen spawn-body copies below read TAU
 
 /** Retained sink so the control's allocations survive GC (arrayBuffers grows). */
 const leak = [];
@@ -166,5 +167,127 @@ export function run() {
     ctx.reset();
     if (ctx.nFill !== 0 || ctx.sumX !== 0 || ctx.minX !== Infinity) {
         die('T9 control: mock ctx reset() left a stale counter or accumulator');
+    }
+
+    // Control 7 -- clear() must be a full reset. A clear() that zeroes the pool
+    // and the counters but SKIPS the clock (and the dimension cache) fails
+    // clearIsFullReset; the fixed clear() passes. Both live inside run().
+    class ClearNoClockEngine extends SnowEngine {
+        clear() {
+            if (this._destroyed) return;
+            this.state.fill(0);
+            this._nFalling = 0;
+            this._nMelting = 0;
+        }
+    }
+    if (clearIsFullReset(new ClearNoClockEngine(64, { density: 400, rng: makeRng(SEED) }), makeMockCtx())) {
+        die('T9 control 7: a clear() that skips the clock passed clearIsFullReset -- the D5 gate cannot fail');
+    }
+    if (!clearIsFullReset(new SnowEngine(64, { density: 400, rng: makeRng(SEED) }), makeMockCtx())) {
+        die('T9 control 7: the fixed clear() failed clearIsFullReset -- the D5 gate passes for the wrong reason');
+    }
+
+    // Control 8 -- destroy() re-inverted to the FROZEN v1.0.2 body: flag first,
+    // then clear() (which then no-ops on the flag), then null the twelve columns
+    // ONLY. It never releases config/colorStr/_buckets and leaves the clock
+    // non-zero, so destroyReleasesAll rejects it; the fixed destroy passes.
+    class RevertedDestroyEngine extends SnowEngine {
+        destroy() {
+            if (this._destroyed) return;
+            this._destroyed = true;
+            this.clear();
+            this.x = null; this.y = null; this.z = null; this.gz = null;
+            this.wz = null; this.bucket = null; this.radius = null;
+            this.driftPhase = null; this.driftSpeed = null; this.driftAmp = null;
+            this.life = null; this.state = null;
+        }
+    }
+    const c8 = new RevertedDestroyEngine(64, { density: 400, rng: makeRng(SEED) });
+    c8.spawn(0.016, 800, 600);
+    c8.updateAndDraw(makeMockCtx(), 0.016, 800, 600);
+    if (destroyReleasesAll(c8)) {
+        die('T9 control 8: the re-inverted destroy passed destroyReleasesAll -- the D6 gate cannot fail');
+    }
+    const c8fixed = new SnowEngine(64, { density: 400, rng: makeRng(SEED) });
+    c8fixed.spawn(0.016, 800, 600);
+    c8fixed.updateAndDraw(makeMockCtx(), 0.016, 800, 600);
+    if (!destroyReleasesAll(c8fixed)) {
+        die('T9 control 8: the fixed destroy failed destroyReleasesAll -- the D6 gate passes for the wrong reason');
+    }
+
+    // Control 9 -- the spawn cap frozen as the pre-S2 `| 0` coercion. A VERBATIM
+    // copy of the current spawn body with the cap line left as Math.floor(...)|0.
+    // FROZEN -- never update this to track the engine. At (0.1, 1e7, 5e6) the raw
+    // cap is 3e10, which `| 0` wraps to a negative -> 0 spawned; the fixed engine
+    // clamps to min(raw, max) and fills all 64.
+    class FrozenCapEngine extends SnowEngine {
+        spawn(dt, w, h) {
+            if (this._destroyed) return;
+            dt = this._sane(dt, w, h); if (dt < 0) return;
+
+            if (this._lastW !== w || this._lastH !== h) {
+                this._lastW = w;
+                this._lastH = h;
+                this._areaModifier = (w * h) / 100000;
+            }
+
+            const cap = Math.floor(this._areaModifier * this.config.density * (dt * 60)) | 0; // FROZEN
+            if (cap <= 0) return;
+            const g = this.config.gravity;
+            let windOffset = g === 0 ? 0 : (h / g) * Math.abs(this.config.wind);
+            if (!Number.isFinite(windOffset)) windOffset = 0;
+            let spawned = 0;
+
+            for (let i = 0; i < this.max; i++) {
+                if (this.state[i] === 0) {
+                    this.state[i] = 1;
+                    this._nFalling++;
+
+                    this.x[i] = this.config.rng() * (w + windOffset * 2) - windOffset;
+                    this.y[i] = -50 - this.config.rng() * 50;
+
+                    this.z[i] = 0.2 + this.config.rng() * 0.8;
+
+                    this.gz[i] = this.config.gravity * this.z[i];
+                    this.wz[i] = this.config.wind * this.z[i];
+
+                    const jitter = (this.config.rng() - 0.5) * 0.8;
+                    const r = (this.config.baseRadius + jitter) * this.z[i];
+                    this.radius[i] = r > 0.01 ? r : 0.01;
+                    this.driftAmp[i] = this.config.driftAmplitude * this.z[i];
+
+                    this.bucket[i] = this.z[i] < 0.4 ? 0 : this.z[i] < 0.7 ? 1 : 2;
+                    this.driftPhase[i] = this.config.rng() * TAU;
+                    this.driftSpeed[i] = this.config.driftFreq + (this.config.rng() - 0.5) * 0.5;
+
+                    if (++spawned >= cap) return;
+                }
+            }
+        }
+    }
+    if (spawnCapNoWrap(new FrozenCapEngine(64, { density: 10, rng: makeRng(SEED) }))) {
+        die('T9 control 9: the frozen | 0 cap filled the pool on a 3e10 raw -- the SN-32 gate cannot fail');
+    }
+    if (!spawnCapNoWrap(new SnowEngine(64, { density: 10, rng: makeRng(SEED) }))) {
+        die('T9 control 9: the fixed cap did not fill the pool -- the SN-32 gate passes for the wrong reason');
+    }
+
+    // Control 10 -- the counter oracle. countersAgree must hold on an untouched
+    // engine after 50 frames AND flag a single hand-decremented counter. This
+    // proves the T7 per-cycle counter assertion can actually fail.
+    const c10 = new SnowEngine(64, {
+        gravity: 5000, density: 200, meltTimeMin: 0.5, meltTimeMax: 1.0, rng: makeRng(SEED),
+    });
+    const ctx10 = makeMockCtx();
+    for (let f = 0; f < 50; f++) {
+        c10.spawn(0.016, 800, 600);
+        c10.updateAndDraw(ctx10, 0.016, 800, 600);
+    }
+    if (!countersAgree(c10)) {
+        die('T9 control 10: an untouched engine failed countersAgree after 50 frames -- the counter oracle passes for the wrong reason');
+    }
+    c10._nMelting -= 1; // hand-corrupt exactly one counter
+    if (countersAgree(c10)) {
+        die('T9 control 10: countersAgree held despite a hand-decremented _nMelting -- the T7 per-cycle counter assertion cannot fail');
     }
 }

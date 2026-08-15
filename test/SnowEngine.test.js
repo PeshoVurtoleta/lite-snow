@@ -180,7 +180,7 @@ describe('boundary', () => {
     test('VERSION is exported and agrees with package.json (three-place sync)', () => {
         const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
         assert.equal(typeof VERSION, 'string');
-        assert.equal(VERSION, '1.0.2');
+        assert.equal(VERSION, '1.0.3');
         assert.equal(VERSION, pkg.version, 'VERSION const and package.json disagree');
     });
 
@@ -441,5 +441,139 @@ describe('S1 mutation-matrix holes', () => {
         assert.ok(liveCount(e) > 0, 'need live flakes for this test to mean anything');
         for (let i = 0; i < 200; i++) e.updateAndDraw(ctx, 0.016, 800, 600);
         assert.equal(liveCount(e), 0, 'every rising flake must be culled above y = -200');
+    });
+});
+
+/**
+ * S2 constructor validation, frozen presets, lifecycle release and telemetry.
+ * Each case is written against a specific mutation from the S2 plan: relaxing
+ * the maxParticles integer guard, deleting the baseRadius guard, freezing the
+ * table but not its members, dropping clear()'s `_elapsedTime = 0`, re-inverting
+ * destroy()'s flag/clear order, deleting any one counter update, or restoring the
+ * em dash in the source.
+ */
+describe('S2 constructor, freeze, lifecycle, telemetry', () => {
+    const SOA = [
+        'x', 'y', 'z', 'gz', 'wz', 'bucket',
+        'radius', 'driftPhase', 'driftSpeed', 'driftAmp', 'life', 'state',
+    ];
+
+    function seeded(seed) {
+        let s = (seed >>> 0) || 1;
+        return function rng() {
+            s ^= s << 13; s >>>= 0;
+            s ^= s >> 17;
+            s ^= s << 5; s >>>= 0;
+            return s / 4294967296;
+        };
+    }
+
+    test('maxParticles: hostile values throw RangeError naming the value', () => {
+        const bad = [0, -1, 2.5, NaN, Infinity, 1e9, '100'];
+        for (const v of bad) {
+            assert.throws(
+                () => new SnowEngine(v, {}),
+                (err) => err instanceof RangeError && err.message.includes(String(v)),
+                `maxParticles=${String(v)} must throw a RangeError naming the value`);
+        }
+        const one = new SnowEngine(1);
+        assert.equal(one.state.length, 1, 'SnowEngine(1) must allocate a 1-slot pool');
+        assert.equal(new SnowEngine().max, 10000, 'the default max must stay 10000');
+    });
+
+    test('baseRadius: non-finite or <= 0 throws, 0.1 constructs', () => {
+        for (const v of [0, -1, NaN, Infinity]) {
+            assert.throws(
+                () => new SnowEngine(100, { baseRadius: v }),
+                (err) => err instanceof RangeError && err.message.includes(String(v)),
+                `baseRadius=${String(v)} must throw`);
+        }
+        assert.doesNotThrow(() => new SnowEngine(100, { baseRadius: 0.1 }));
+    });
+
+    test('SNOW_PRESETS and every preset member are frozen', () => {
+        assert.ok(Object.isFrozen(SNOW_PRESETS), 'the table must be frozen');
+        assert.ok(Object.isFrozen(SNOW_PRESETS.flurry), 'flurry must be frozen');
+        assert.ok(Object.isFrozen(SNOW_PRESETS.heavy), 'heavy must be frozen');
+        assert.ok(Object.isFrozen(SNOW_PRESETS.blizzard), 'blizzard must be frozen');
+        assert.throws(() => { SNOW_PRESETS.flurry.density = 999; }, TypeError);
+    });
+
+    test('clear() is a full reset: a cleared engine reproduces a fresh one bit-for-bit', () => {
+        // gravity is huge so every flake settles in one frame -> all 12 columns
+        // are written for all 8 slots, leaving no stale free-slot data to differ.
+        // x depends on _elapsedTime through the drift sway, so a clear() that does
+        // not reset the clock diverges here (the named mutation).
+        const cfg = () => ({
+            gravity: 100000, wind: 0, density: 1000, baseRadius: 2.5,
+            driftAmplitude: 15, driftFreq: 1.0, meltTimeMin: 2.0, meltTimeMax: 5.0,
+            rng: seeded(0xC0FFEE),
+        });
+        const A = new SnowEngine(8, cfg());
+        A.spawn(0.1, 400, 10);
+        A.updateAndDraw(ctx, 0.1, 400, 10);
+
+        const B = new SnowEngine(8, cfg());
+        for (let f = 0; f < 5; f++) { B.spawn(0.1, 400, 10); B.updateAndDraw(ctx, 0.1, 400, 10); }
+        B.config.rng = seeded(0xC0FFEE); // realign the stream to A's position
+        B.clear();
+        B.spawn(0.1, 400, 10);
+        B.updateAndDraw(ctx, 0.1, 400, 10);
+
+        for (const name of SOA) {
+            for (let i = 0; i < 8; i++) {
+                assert.ok(Object.is(A[name][i], B[name][i]),
+                    `${name}[${i}]: fresh ${A[name][i]} != cleared ${B[name][i]}`);
+            }
+        }
+        assert.ok(Object.is(A._elapsedTime, B._elapsedTime), '_elapsedTime must match');
+    });
+
+    test('destroy() releases config, colorStr and _buckets and zeroes the clock', () => {
+        const e = new SnowEngine(100, { density: 200 });
+        e.spawn(0.016, 800, 600);
+        e.updateAndDraw(ctx, 0.016, 800, 600);
+        e.destroy();
+        assert.equal(e.config, null, 'destroy() must null config');
+        assert.equal(e.colorStr, null, 'destroy() must null colorStr');
+        assert.equal(e._buckets, null, 'destroy() must null _buckets');
+        assert.equal(e._elapsedTime, 0, 'destroy() must reset the clock via clear()');
+        assert.equal(e._destroyed, true, 'destroy() must set the flag');
+        assert.doesNotThrow(() => e.destroy(), 'double destroy() must be a no-op');
+    });
+
+    test('fallingCount / meltingCount / activeCount track the pool', () => {
+        const e = new SnowEngine(200, {
+            gravity: 5000, density: 300, meltTimeMin: 0.5, meltTimeMax: 1.0, rng: seeded(0x33),
+        });
+        e.spawn(0.016, 800, 600);
+        assert.ok(e.fallingCount > 0, 'a bare spawn must raise fallingCount');
+        assert.equal(e.meltingCount, 0, 'no flake has settled yet');
+        assert.equal(e.activeCount, e.fallingCount + e.meltingCount);
+
+        for (let i = 0; i < 80; i++) { e.spawn(0.016, 800, 600); e.updateAndDraw(ctx, 0.016, 800, 600); }
+        let f = 0, m = 0;
+        for (let i = 0; i < e.max; i++) {
+            if (e.state[i] === 1) f++;
+            else if (e.state[i] === 2) m++;
+        }
+        assert.equal(e.fallingCount, f, 'fallingCount must match a fresh recount');
+        assert.equal(e.meltingCount, m, 'meltingCount must match a fresh recount');
+        assert.equal(e.activeCount, f + m, 'activeCount must be the sum');
+
+        e.clear();
+        assert.equal(e.fallingCount, 0, 'clear() must zero fallingCount');
+        assert.equal(e.meltingCount, 0, 'clear() must zero meltingCount');
+        assert.equal(e.activeCount, 0, 'clear() must zero activeCount');
+    });
+
+    test('SnowEngine.js source is ASCII-only (U+00D7 and U+00B5 excepted)', () => {
+        const src = readFileSync(new URL('../SnowEngine.js', import.meta.url), 'utf8');
+        for (let i = 0; i < src.length; i++) {
+            const cp = src.codePointAt(i);
+            if (cp > 127 && cp !== 0x00D7 && cp !== 0x00B5) {
+                assert.fail(`non-ASCII U+${cp.toString(16).toUpperCase()} at index ${i}`);
+            }
+        }
     });
 });
