@@ -7,10 +7,10 @@
 [![npm downloads](https://img.shields.io/npm/dm/@zakkster/lite-snow?style=for-the-badge&color=blue)](https://www.npmjs.com/package/@zakkster/lite-snow)
 [![npm total downloads](https://img.shields.io/npm/dt/@zakkster/lite-snow?style=for-the-badge&color=blue)](https://www.npmjs.com/package/@zakkster/lite-snow)
 ![TypeScript](https://img.shields.io/badge/TypeScript-Types-informational)
-![Dependencies](https://img.shields.io/badge/dependencies-1-brightgreen)
+![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 
-Zero-GC SoA environmental snow engine with drift physics, Z-depth parallax, ellipse accumulation, and bucketed rendering. One dependency. 3 presets. 213 lines.
+Zero-GC SoA environmental snow engine with drift physics, Z-depth parallax, ellipse accumulation, and bucketed rendering. Zero dependencies. 3 presets. 213 lines.
 
 ## Live Demo
 https://cdpn.io/pen/debug/yyapJqB

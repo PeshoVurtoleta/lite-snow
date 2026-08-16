@@ -1,12 +1,12 @@
 # @zakkster/lite-snow
 
-> Zero-GC SoA environmental snow engine. Drift physics, Z-depth parallax, ellipse accumulation, bucketed rendering. One dependency.
+> Zero-GC SoA environmental snow engine. Drift physics, Z-depth parallax, ellipse accumulation, bucketed rendering. Zero dependencies.
 
 ## Install
 npm i @zakkster/lite-snow
 
 ## Dependencies
-@zakkster/lite-color (OKLCH → CSS string conversion)
+None. Zero runtime deps: OKLCH object -> CSS string is inlined in the engine.
 
 ## Import
 import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
@@ -14,18 +14,18 @@ import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 ## Key Facts
 - 12 SoA arrays: x, y, z, gz, wz, bucket, radius, driftPhase, driftSpeed, driftAmp, life, state
 - Precomputed per-flake: gz[]=gravity*z, wz[]=wind*z, radius[]=base*z, driftAmp[]=amp*z, bucket[]
-- Two-phase lifecycle: flake(state=1) drifts down → settles → melt(state=2) as flat ellipse
+- Two-phase lifecycle: flake(state=1) drifts down -> settles -> melt(state=2) as flat ellipse
 - Sinusoidal drift: per-flake random phase + speed + depth-scaled amplitude
-- Z-depth parallax (0.2–1.0): all physics/render params scale by depth
+- Z-depth parallax (0.2-1.0): all physics/render params scale by depth
 - Bin-driven render: the physics pass bins every live flake into 4 preallocated Uint32 index lists (3 depth buckets + melt) in one sweep; render iterates only live slots. One full-pool scan per frame, down from 5
 - 3 depth-bucket fills + one fill per populated melt band = 3 + up to 8 draw calls per frame, independent of on-screen flake count
 - Melt phase: ellipse (2.5× wider, 0.5× tall) with life-ratio alpha fade
 - Dimension cache: _areaModifier recomputed only on canvas size change
-- Off-screen culling: X ± 200px and Y < -200 (wind + negative gravity leak)
+- Off-screen culling: X +/- 200px and Y < -200 (wind + negative gravity leak)
 - Responsive density: spawn count scales with canvas area
 - 3 presets: SNOW_PRESETS.flurry, .heavy, .blizzard
-- No clearRect — snow is overlay. Caller clears.
-- spawn() and updateAndDraw() separate — caller controls timing
+- No clearRect -- snow is overlay. Caller clears.
+- spawn() and updateAndDraw() separate -- caller controls timing
 - Pre-parsed OKLCH color in constructor
 - RNG injectable, no lite-random dep
 - Ring-cursor spawn (SN-12): persistent _spawnCursor wraps; a full wrap with no free slot fails closed (stops, never spins); clear() resets it
@@ -41,12 +41,12 @@ import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 - SNOW_PRESETS and each of .flurry/.heavy/.blizzard are Object.frozen
 
 ## API
-- VERSION: '1.1.0'
+- VERSION: '1.1.1'
 - new SnowEngine(maxParticles?, config?)
-- .spawn(dt, w, h) — spawn new flakes
-- .updateAndDraw(ctx, dt, w, h) — physics + render
-- .clear() — kill all
-- .destroy() — release arrays
+- .spawn(dt, w, h) -- spawn new flakes
+- .updateAndDraw(ctx, dt, w, h) -- physics + render
+- .clear() -- kill all
+- .destroy() -- release arrays
 - .fallingCount / .meltingCount / .activeCount -- live telemetry getters (O(1))
 
 ## Config
@@ -55,9 +55,9 @@ driftFreq (1.0), meltTimeMin (2.0), meltTimeMax (5.0),
 color ('oklch(0.98 0.02 250)'), rng (Math.random)
 
 ## Presets
-SNOW_PRESETS.flurry — gentle
-SNOW_PRESETS.heavy — dense, windy
-SNOW_PRESETS.blizzard — extreme wind + density
+SNOW_PRESETS.flurry -- gentle
+SNOW_PRESETS.heavy -- dense, windy
+SNOW_PRESETS.blizzard -- extreme wind + density
 
 ## Game Loop
 snow.spawn(dt, w, h);

@@ -16,19 +16,95 @@
  *     floor(areaModifier * density * dt * 60). This is the SN-02 detector
  *     stated as a law -- with VALID inputs it holds today; the degenerate
  *     inputs that break it live in T1.
+ *   - ASCII law (SN-24, S4): SnowEngine.js, SnowEngine.d.ts, llms.txt,
+ *     README.md and CHANGELOG.md contain zero bytes outside ASCII except the
+ *     two permitted code points, U+00D7 (x) and U+00B5 (micro). The roadmap
+ *     describes the guard as `grep -nP '[^\x00-\x7F\x{00D7}\x{00B5}]'`; this
+ *     tier PROVES the guard command itself before trusting its 0-hit result
+ *     on the real files -- a guard that cannot fire is decorative (T9's rule,
+ *     applied here to a grep invocation instead of an in-process control).
+ *     MEASURED FINDING: this host's `grep` (BSD grep 2.6.0-FreeBSD, the macOS
+ *     default -- confirmed via `grep --version` and a `spawnSync` PCRE probe)
+ *     does not implement `-P` at all ("invalid option -- P", exit 2) when
+ *     invoked as a bare child_process (no shell, so no interactive-shell
+ *     grep-wrapping alias applies). Shelling out to a literal `grep -nP`
+ *     would therefore silently mis-measure -- exit 2 on EVERY input, good or
+ *     bad, which is indistinguishable from "0 hits" unless the exit code is
+ *     inspected, and even then the gate cannot run at all on a plain macOS
+ *     box. This tier probes PCRE support at runtime and uses the real
+ *     `grep -nP` when available (GNU grep, Linux CI), falling back to an
+ *     IDENTICAL-semantics pure-JS scan (`/[^\x00-\x7F×µ]/u` per
+ *     line) when it is not -- so the gate is always live, never decorative,
+ *     on any host. Both code paths are exercised by the two-direction proof
+ *     below when possible.
  *
- * All inputs here are finite and in-range: T0 proves the engine is correct on
- * good data. Degenerate data is T1's job.
+ * All non-ASCII-law inputs here are finite and in-range: T0 proves the engine
+ * is correct on good data. Degenerate data is T1's job.
  */
 
 import { SnowEngine } from '../../SnowEngine.js';
 import { SEED, makeRng, check, makeMockCtx, conservation, spawnBoundHolds } from './harness.mjs';
+import { spawnSync, execFileSync } from 'node:child_process';
+import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const MAX = 400;
 const FRAMES = 200;
 const DT = 0.05;
 const W = 800;
 const H = 600;
+
+// --- ASCII law guard -------------------------------------------------------
+
+const PKG_ROOT = fileURLToPath(new URL('../../', import.meta.url));
+const ASCII_GUARD_FILES = [
+    'SnowEngine.js', 'SnowEngine.d.ts', 'llms.txt', 'README.md', 'CHANGELOG.md',
+].map((f) => join(PKG_ROOT, f));
+const ASCII_GUARD_PCRE = '[^\\x00-\\x7F\\x{00D7}\\x{00B5}]';
+// Identical semantics to the PCRE pattern above, expressed for V8's engine:
+// \x{00D7}/\x{00B5} in PCRE are U+00D7/U+00B5, i.e. ×/µ with the
+// `u` flag (astral-safe, though both code points are BMP already).
+const ASCII_GUARD_JS = /[^\x00-\x7F×µ]/u;
+
+let pcreSupportCache;
+/** True iff the host's `grep` binary understands `-P` (PCRE). Probed once. */
+function grepSupportsPcre() {
+    if (pcreSupportCache !== undefined) return pcreSupportCache;
+    try {
+        const r = spawnSync('grep', ['-nP', 'x'], { input: 'x\n', encoding: 'utf8' });
+        // A working -P on a matching line exits 0 with output; an unsupported
+        // -P exits 2 ("invalid option") regardless of input -- that is the
+        // exact failure mode measured on this host's BSD grep.
+        pcreSupportCache = r.status === 0 && r.stdout.length > 0;
+    } catch {
+        pcreSupportCache = false;
+    }
+    return pcreSupportCache;
+}
+
+/** Count of lines across `paths` containing a byte outside the ASCII law. */
+function asciiGuardHits(paths) {
+    if (grepSupportsPcre()) {
+        try {
+            const out = execFileSync('grep', ['-nP', ASCII_GUARD_PCRE, ...paths], { encoding: 'utf8' });
+            return out.split('\n').filter((l) => l.length > 0).length;
+        } catch (err) {
+            if (err.status === 1) return 0; // grep: ran fine, zero matches
+            throw err; // a real tool fault -- surface it, do not mask as 0
+        }
+    }
+    // Portable fallback: identical regex, evaluated in-process.
+    let hits = 0;
+    for (let i = 0; i < paths.length; i++) {
+        const lines = readFileSync(paths[i], 'utf8').split('\n');
+        for (let j = 0; j < lines.length; j++) {
+            if (ASCII_GUARD_JS.test(lines[j])) hits++;
+        }
+    }
+    return hits;
+}
 
 function makeEngine(seed) {
     return new SnowEngine(MAX, {
@@ -118,4 +194,36 @@ export function run() {
     const s = new SnowEngine(MAX, { density: 20, rng: makeRng(SEED ^ 0x0f0f0f0f) });
     check(spawnBoundHolds(s, 0.016, W, H),
         () => `T0.spawnbound: one spawn exceeded floor(areaModifier*density*dt*60) or dropped the live count (seed=${SEED})`);
+
+    // --- Law 5: ASCII law (SN-24) -------------------------------------------
+    // (i) Prove the guard can FIRE at all -- direction (a) -- before trusting
+    // its silence on the real files. Direction (b) proves it does NOT fire on
+    // the one permitted exception. Both run against a scratch temp dir, never
+    // against the shipped files, and are cleaned up unconditionally.
+    const scratch = mkdtempSync(join(tmpdir(), 'lite-snow-ascii-guard-'));
+    try {
+        const arrowFile = join(scratch, 'arrow.txt');
+        const timesFile = join(scratch, 'times.txt');
+        // (a) U+2192 (RIGHTWARDS ARROW) is NOT a permitted exception: the guard
+        // must count at least one hit.
+        writeFileSync(arrowFile, 'a line with a forbidden arrow → here\n', 'utf8');
+        const arrowHits = asciiGuardHits([arrowFile]);
+        check(arrowHits > 0,
+            () => `T0.asciiGuard: guard failed to FIRE on a planted U+2192 -- measured ${arrowHits} hits, wanted > 0 (guard is decorative)`);
+
+        // (b) U+00D7 (MULTIPLICATION SIGN) is the one permitted exception: the
+        // guard must report zero hits on a file whose only non-ASCII byte is it.
+        writeFileSync(timesFile, 'a line with a permitted 3 × 3 sign only\n', 'utf8');
+        const timesHits = asciiGuardHits([timesFile]);
+        check(timesHits === 0,
+            () => `T0.asciiGuard: guard fired on the permitted U+00D7 -- measured ${timesHits} hits, wanted 0 (guard is untrustworthy in the direction that matters)`);
+    } finally {
+        rmSync(scratch, { recursive: true, force: true });
+    }
+
+    // (ii) Only after both directions are proven live do we trust a 0-hit
+    // result on the real shipped files.
+    const realHits = asciiGuardHits(ASCII_GUARD_FILES);
+    check(realHits === 0,
+        () => `T0.asciiGuard: ${realHits} non-ASCII (beyond U+00D7/U+00B5) hits across ${ASCII_GUARD_FILES.join(', ')}`);
 }

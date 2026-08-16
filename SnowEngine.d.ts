@@ -1,9 +1,9 @@
 /**
- * @zakkster/lite-snow — TypeScript Declarations
+ * @zakkster/lite-snow -- TypeScript Declarations
  */
 
 export interface SnowConfig {
-    /** Downward acceleration in px/s². Default: 40 */
+    /** Downward acceleration in px/s^2. Default: 40 */
     gravity?: number;
     /** Horizontal wind in px/s. Positive = right. Default: 30 */
     wind?: number;
@@ -97,7 +97,7 @@ export declare class SnowEngine {
 
     /**
      * Update physics and render all snow particles.
-     * Does NOT clear the canvas — snow is an overlay. Caller clears.
+     * Does NOT clear the canvas -- snow is an overlay. Caller clears.
      * Call spawn() before this each frame.
      * A non-finite or negative dt, or a non-positive/non-finite w/h, is a
      * documented no-op frame: the clock does not advance and no state is touched.

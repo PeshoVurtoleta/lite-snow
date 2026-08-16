@@ -60,10 +60,6 @@
             font-size: 12px;
             margin-bottom: 6px;
             font-weight: 600;
-            color: #ddee11;
-        }
-
-        label {
             color: #d0e0ff;
         }
 
@@ -92,9 +88,11 @@
             transition: 0.2s;
         }
 
-        button:hover {
-            background: #30405a;
-            color: #fff;
+        @media (hover: hover) {
+            button:hover {
+                background: #30405a;
+                color: #fff;
+            }
         }
 
         button.active {
@@ -102,6 +100,14 @@
             color: #0d111a;
             border-color: #ffffff;
             box-shadow: 0 0 15px rgba(255, 255, 255, 0.4);
+        }
+
+        #telemetry {
+            margin-top: 20px;
+            font-size: 11px;
+            font-variant-numeric: tabular-nums;
+            letter-spacing: 0.5px;
+            color: #8fb3e0;
         }
     </style>
 </head>
@@ -130,86 +136,21 @@
         <button id="btnHeavy">Heavy</button>
         <button id="btnBlizzard">Blizzard</button>
     </div>
+
+    <div id="telemetry">active 0 | falling 0 | melting 0</div>
 </div>
 
 <canvas id="stage"></canvas>
 
 <script type="module">
-    // --- INLINED CORE ENGINE ---
-    const TAU = Math.PI * 2;
+    // Thin shell: build the real DOM env, hand it to the importable controller.
+    // The engine is the LOCAL repo build (../SnowEngine.js), so the demo
+    // exercises the code in this checkout, not a pinned esm.run release.
+    import { SnowEngine, SNOW_PRESETS } from '../SnowEngine.js';
+    import { createSnowDemo } from './SnowDemo.js';
 
-    import {SnowEngine} from 'https://esm.run/@zakkster/lite-snow@1.0.0';
-
-    // --- APP WIRING ---
-    const canvas = document.getElementById('stage');
-    const ctx = canvas.getContext('2d', {alpha: false});
-    const engine = new SnowEngine();
-
-    let w = 0, h = 0;
-    const dpr = window.devicePixelRatio || 1;
-
-    function updateSize() {
-        w = window.innerWidth;
-        h = window.innerHeight;
-        canvas.width = w * dpr;
-        canvas.height = h * dpr;
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.scale(dpr, dpr);
-    }
-
-    window.addEventListener('resize', updateSize);
-    updateSize();
-
-    // UI Controls
-    const dom = {
-        den: document.getElementById('density'), denVal: document.getElementById('denVal'),
-        wind: document.getElementById('wind'), windVal: document.getElementById('windVal'),
-        grav: document.getElementById('gravity'), gravVal: document.getElementById('gravVal'),
-        btns: [document.getElementById('btnFlurry'), document.getElementById('btnHeavy'), document.getElementById('btnBlizzard')]
-    };
-
-    function updateUI() {
-        dom.denVal.innerText = dom.den.value + '.0';
-        dom.windVal.innerText = dom.wind.value;
-        dom.gravVal.innerText = dom.grav.value;
-        engine.config.density = parseFloat(dom.den.value);
-        engine.config.wind = parseFloat(dom.wind.value);
-        engine.config.gravity = parseFloat(dom.grav.value);
-    }
-
-    [dom.den, dom.wind, dom.grav].forEach(el => el.addEventListener('input', updateUI));
-
-    function switchPreset(btn, den, wind, grav, driftAmp) {
-        dom.btns.forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        dom.den.value = den;
-        dom.wind.value = wind;
-        dom.grav.value = grav;
-        engine.config.driftAmplitude = driftAmp;
-        updateUI();
-    }
-
-    document.getElementById('btnFlurry').onclick = (e) => switchPreset(e.target, 10, 30, 40, 15);
-    document.getElementById('btnHeavy').onclick = (e) => switchPreset(e.target, 24, 150, 80, 25);
-    document.getElementById('btnBlizzard').onclick = (e) => switchPreset(e.target, 40, 400, 250, 50);
-
-    // Loop
-    let lastTime = performance.now();
-
-    function loop(time) {
-        const dt = Math.min((time - lastTime) / 1000, 0.1);
-        lastTime = time;
-
-        ctx.fillStyle = '#0d111a';
-        ctx.fillRect(0, 0, w, h);
-
-        engine.spawn(dt, w, h);
-        engine.updateAndDraw(ctx, dt, w, h);
-
-        requestAnimationFrame(loop);
-    }
-
-    requestAnimationFrame(loop);
+    const engine = new SnowEngine(10000, SNOW_PRESETS.flurry);
+    createSnowDemo({ window, document, engine });
 </script>
 </body>
 </html>

@@ -180,7 +180,7 @@ describe('boundary', () => {
     test('VERSION is exported and agrees with package.json (three-place sync)', () => {
         const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
         assert.equal(typeof VERSION, 'string');
-        assert.equal(VERSION, '1.1.0');
+        assert.equal(VERSION, '1.1.1');
         assert.equal(VERSION, pkg.version, 'VERSION const and package.json disagree');
     });
 

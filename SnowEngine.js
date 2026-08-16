@@ -1,12 +1,10 @@
 /**
- * @zakkster/lite-snow v1.1.0
+ * @zakkster/lite-snow v1.1.1
  * Zero-GC, SoA Environmental Snow Engine
  * Drift physics, Z-depth parallax, ellipse accumulation, bin-driven rendering, 3 presets.
  */
 
-import { toCssOklch } from '@zakkster/lite-color';
-
-export const VERSION = '1.1.0';
+export const VERSION = '1.1.1';
 
 const TAU = Math.PI * 2;
 const DT_MAX = 0.1;
@@ -54,7 +52,7 @@ export class SnowEngine {
             throw new RangeError('lite-snow: baseRadius must be a finite number > 0, got ' + String(this.config.baseRadius));
         }
 
-        this.colorStr = typeof this.config.color === 'string' ? this.config.color : toCssOklch(this.config.color);
+        this.colorStr = typeof this.config.color === 'string' ? this.config.color : this._cssOklch(this.config.color);
 
         this.x = new Float32Array(this.max);
         this.y = new Float32Array(this.max);
@@ -95,6 +93,22 @@ export class SnowEngine {
         // Ring cursor for spawn: the next slot to probe, wrapping at max, so a
         // spawn is O(spawned) amortised instead of O(max)-from-zero (SN-12).
         this._spawnCursor = 0;
+    }
+
+    // Inlined OKLCH-object -> CSS-string formatter (SN-19: was toCssOklch from
+    // @zakkster/lite-color, dropped to hold suite zero-runtime-dep law). Output is
+    // BYTE-IDENTICAL to that function for a valid { l, c, h, a? } object. Fails
+    // closed to the documented default string on a null/non-object input or any
+    // non-finite channel -- it must never emit "oklch(NaN NaN NaN)", which canvas
+    // silently ignores, stranding fillStyle at whatever it was set to before.
+    _cssOklch(c) {
+        if (c === null || typeof c !== 'object') return 'oklch(0.98 0.02 250)';
+        const l = c.l, ch = c.c, h = c.h;
+        if (!Number.isFinite(l) || !Number.isFinite(ch) || !Number.isFinite(h)) {
+            return 'oklch(0.98 0.02 250)';
+        }
+        const a = c.a === undefined ? 1 : c.a;
+        return 'oklch(' + l.toFixed(4) + ' ' + ch.toFixed(4) + ' ' + h.toFixed(2) + ' / ' + a + ')';
     }
 
     /** Fail-closed frame door. Returns the clamped dt, or -1 to reject the frame. */

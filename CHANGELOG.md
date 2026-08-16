@@ -3,6 +3,55 @@
 All notable changes to `@zakkster/lite-snow` are documented here. The format
 follows Keep a Changelog, and the project adheres to Semantic Versioning.
 
+## [1.1.1] - 2026-08-15
+
+Session S4. No physics or rendering change: `spawn()` and `updateAndDraw()` are
+byte-identical to 1.1.0, proven by diff. This session closes the last suite-law
+breaches -- a runtime dependency carried for one string template, missing
+metadata, and non-ASCII source -- and makes the demo exercise the local build
+without leaking.
+
+### Changed
+
+- **SN-19 -- zero runtime dependencies.** The lone runtime dep,
+  `@zakkster/lite-color`, was used for exactly one constructor call
+  (`toCssOklch`, only when `color` is an `{ l, c, h }` object). That call is now a
+  six-line private formatter, `_cssOklch`, whose output is byte-identical to
+  `toCssOklch` for a valid object and fails closed to `'oklch(0.98 0.02 250)'` on
+  a null/non-object input or a non-finite channel -- never `"oklch(NaN NaN NaN)"`,
+  which canvas silently ignores. `@zakkster/lite-color` stays a devDependency so
+  the byte-identity is provable across a 64-color corpus. See
+  `decisions/0001-zero-deps.md`.
+- **SN-21 -- `"sideEffects": false`** added; a `LICENSE` file (MIT) added and
+  listed in `files[]`.
+- **SN-22 -- dropped the `"webgl"` keyword.** The engine touches
+  `CanvasRenderingContext2D` and nothing else.
+- **SN-24 -- ASCII pass.** Fixed the real non-ASCII breaches in `SnowEngine.d.ts`
+  and `llms.txt` (`->`, `--`, `+/-`, `^2`); the permitted U+00D7 is left alone.
+- **Dependency-count claims corrected.** The amputation made "one dependency"
+  false: the `llms.txt` tagline and Dependencies section and the `README.md`
+  badge and tagline now state zero runtime deps.
+
+### Added
+
+- **Importable demo controller `demo/SnowDemo.js`** (SN-27/SN-28):
+  `createSnowDemo({ window, document, engine }) -> { destroy }`. All wiring is
+  dependency-injected, so the leak-safe lifecycle is testable under house law
+  without a DOM library. `demo.html` is now a thin shell over it.
+
+### Fixed
+
+- **SN-27 -- the demo resize leak.** The synchronous `window.addEventListener
+  ('resize', ...)` is replaced by an rAF-batched `ResizeObserver`, and every
+  listener plus the observer plus the rAF is torn down in `destroy()`, wired to
+  `pagehide`. `devicePixelRatio` is re-read on every resize instead of captured
+  once.
+- **SN-28 -- the demo ran stale, remote code.** It imported
+  `esm.run/@zakkster/lite-snow@1.0.0`; it now imports the local `../SnowEngine.js`
+  and drives the preset buttons off the shipped `SNOW_PRESETS`, with a telemetry
+  readout over the 1.1.0 `activeCount`/`fallingCount`/`meltingCount` getters. The
+  dead `// --- INLINED CORE ENGINE ---` comment and `const TAU` are gone.
+
 ## [1.1.0] - 2026-08-15
 
 Session S3, the headline render session. Six findings, one root cause: the frame
@@ -413,6 +462,7 @@ non-fatal known-issue reproductions so they are visible on every run.
   Repro: `e.spawn(0.016,800,600); e.updateAndDraw(ctx,-1,800,600)` ->
   `e._elapsedTime` is negative and the live count drops.
 
+[1.1.1]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.1.1
 [1.1.0]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.1.0
 [1.0.3]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.0.3
 [1.0.2]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.0.2

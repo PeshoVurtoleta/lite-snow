@@ -1,11 +1,12 @@
 {
   "name": "@zakkster/lite-snow",
   "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Zero-GC, SoA environmental snow engine with drift physics, Z-depth parallax, ellipse-based accumulation, dimension caching, and off-screen culling. Designed for cinematic snowfall with high-performance rendering and natural flake behavior.",
   "type": "module",
   "main": "./SnowEngine.js",
   "module": "./SnowEngine.js",
+  "sideEffects": false,
   "types": "./SnowEngine.d.ts",
   "exports": {
     ".": {
@@ -20,7 +21,8 @@
     "SnowEngine.d.ts",
     "llms.txt",
     "README.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"
@@ -39,9 +41,6 @@
     "type": "github",
     "url": "https://github.com/sponsors/PeshoVurtoleta"
   },
-  "dependencies": {
-    "@zakkster/lite-color": "^2.1.0"
-  },
   "keywords": [
     "snow",
     "snowfall",
@@ -51,7 +50,6 @@
     "particle-system",
     "canvas",
     "2d",
-    "webgl",
     "oklch",
     "zero-gc",
     "soa",
@@ -67,6 +65,7 @@
     "lite-engine"
   ],
   "devDependencies": {
+    "@zakkster/lite-color": "^2.1.0",
     "@zakkster/lite-gc-profiler": "^1.15.0",
     "@zakkster/lite-leak": "^1.8.1"
   },
