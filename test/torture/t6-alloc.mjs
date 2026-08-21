@@ -4,7 +4,7 @@
  * A steady-state spawn + updateAndDraw hot loop against the mock ctx, measured
  * with lite-gc-profiler and gated at maxMajor:0 / maxPauseMs:4 /
  * maxArrayBuffersGrowth:0. The last rule is the one that matters: the engine's
- * twelve SoA columns are ArrayBuffer backing stores, which live OUTSIDE the V8
+ * fourteen SoA columns are ArrayBuffer backing stores, which live OUTSIDE the V8
  * heap and are invisible to a heapUsed gate (measured 152x blind spot). It
  * requires `stabilize:'deep'`, which `runOpsGate` supplies.
  *

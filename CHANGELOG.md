@@ -3,6 +3,43 @@
 All notable changes to `@zakkster/lite-snow` are documented here. The format
 follows Keep a Changelog, and the project adheres to Semantic Versioning.
 
+## [1.2.0] - 2026-08-21
+
+Session S5. Living air: `gust`, `turbulence` and `drag`. All three are OFF by
+default, and with them off `spawn()` and `updateAndDraw()` are BYTE-IDENTICAL to
+1.1.1 -- proven by reproducing the committed determinism hash
+`f2e3ccef...ef15` (12 v1.1.1 columns, `makeRng(0x5EED1234)`, 2000 slots, 3000
+frames at dt 1/60 over 1280x720) before and after the change. See
+`decisions/0002-living-air.md`.
+
+### Added
+
+- **`gust` (default 0)** -- a GLOBAL sinusoidal horizontal acceleration in
+  px/s^2, its phase riding the shared `_elapsedTime` clock at `gustFreq`.
+- **`gustFreq` (default TAU/3)** -- gust angular frequency in rad/s.
+- **`turbulence` (default 0)** -- a PER-FLAKE rotating acceleration in px/s^2
+  that reuses each flake's `driftPhase`/`driftSpeed` (zero new rng, zero new
+  phase column); `cos(tp)` drives `vx`, `sin(tp)` drives `vy` for the single
+  `tp = et*driftSpeed[i] + driftPhase[i]` already computed for sway.
+- **`drag` (default 1 = off)** -- terminal-velocity damping in `[0, 1]`. `drag`
+  is a SEPARATE integration model, not the default times a factor: its guarded
+  branch folds gravity/wind into `vx`/`vy` and damps toward a terminal fall
+  speed, so a smaller `drag` lowers the steady-state fall speed. Off by default,
+  so it never touches the default path.
+- **Two SoA columns, `vx`/`vy`** (`Float32Array`). The layout grows from 12
+  columns to 14, 58 -> 66 bytes/particle (+8 B, +80 KB at max 10000). Additive
+  under the layout contract. `vx`/`vy` are zeroed on every spawn so a recycled
+  ring slot never inherits a dead flake's velocity, and nulled by `destroy()`.
+
+### Design
+
+- Every living-air knob **fails closed**: a non-finite value, including `null`,
+  lands on its DEFAULT, not on 0. null is not zero.
+- An **ACCEL_MAX = 10000 px/s^2** component clamp bounds every acceleration fed
+  into `vx`/`vy`, so velocity growth stays linear and positions stay finite for
+  ANY finite input (`gust: 1e9 + turbulence: 1e9 + drag: 0` over 100k frames
+  leaves every live position finite).
+
 ## [1.1.1] - 2026-08-15
 
 Session S4. No physics or rendering change: `spawn()` and `updateAndDraw()` are
@@ -462,6 +499,7 @@ non-fatal known-issue reproductions so they are visible on every run.
   Repro: `e.spawn(0.016,800,600); e.updateAndDraw(ctx,-1,800,600)` ->
   `e._elapsedTime` is negative and the live count drops.
 
+[1.2.0]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.2.0
 [1.1.1]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.1.1
 [1.1.0]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.1.0
 [1.0.3]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.0.3

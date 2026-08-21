@@ -37,11 +37,34 @@ export const BREAK = process.env.SNOW_TORTURE_BREAK === '1';
 /** Base zero-GC rules. maxArrayBuffersGrowth needs measureOps `stabilize:'deep'`. */
 export const RULES = { maxMajor: 0, maxPauseMs: 4, maxArrayBuffersGrowth: 0 };
 
-/** The twelve parallel SoA columns published by llms.txt:15. The layout contract. */
-export const SOA_NAMES = [
+/**
+ * The CURRENT SoA columns, in layout order. As of v1.2.0 (S5 living air) this is
+ * fourteen names -- the original twelve plus vx, vy. It is the canonical list:
+ * destroyReleasesAll() loops it to assert every column was nulled (so vx/vy are
+ * now covered), t6 pins every backing store's byteLength through it, and t1
+ * snapshots every column through it for the no-op-frame determinism check.
+ *
+ * NOTE ON HASHES: no committed sha256 digest in this suite domains over
+ * SOA_NAMES -- the v1.1.1 baseline digest (f2e3ccef...ef15) is taken over the
+ * frozen twelve-name SOA_NAMES_V111 below, in v1.1.1 order, so appending vx/vy
+ * here re-bases nothing. Grepped every SOA_NAMES consumer to confirm.
+ */
+export const SOA_NAMES = Object.freeze([
     'x', 'y', 'z', 'gz', 'wz', 'bucket',
     'radius', 'driftPhase', 'driftSpeed', 'driftAmp', 'life', 'state',
-];
+    'vx', 'vy',
+]);
+
+/**
+ * The FROZEN v1.1.1 twelve-column set, in the exact order the committed
+ * back-compat determinism digest (f2e3ccef...ef15) hashes. This list MUST NEVER
+ * CHANGE: any hash proving byte-identity to v1.1.1 domains over exactly these
+ * twelve names. New columns go on SOA_NAMES above, never here.
+ */
+export const SOA_NAMES_V111 = Object.freeze([
+    'x', 'y', 'z', 'gz', 'wz', 'bucket',
+    'radius', 'driftPhase', 'driftSpeed', 'driftAmp', 'life', 'state',
+]);
 
 /** Seeded xorshift32. Returns a function yielding a uint32 each call. */
 export function makePrng(seed) {
@@ -274,7 +297,7 @@ export function clearIsFullReset(engine, ctx) {
 }
 
 /**
- * destroy() must release EVERYTHING: the twelve SoA columns, `config`,
+ * destroy() must release EVERYTHING: the fourteen SoA columns, `config`,
  * `colorStr` and the five render bins all null, the clock and both
  * dimension-cache fields and both counters zeroed (via the clear() it runs
  * FIRST, before the flag), and `_destroyed` true. Calls destroy() on `engine`,

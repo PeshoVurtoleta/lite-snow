@@ -23,9 +23,15 @@ export function createSnowDemo({ window, document, engine }) {
     const $den = document.getElementById('density');
     const $wind = document.getElementById('wind');
     const $grav = document.getElementById('gravity');
+    const $gust = document.getElementById('gust');
+    const $turb = document.getElementById('turbulence');
+    const $drag = document.getElementById('drag');
     const $denVal = document.getElementById('denVal');
     const $windVal = document.getElementById('windVal');
     const $gravVal = document.getElementById('gravVal');
+    const $gustVal = document.getElementById('gustVal');
+    const $turbVal = document.getElementById('turbVal');
+    const $dragVal = document.getElementById('dragVal');
     const $telemetry = document.getElementById('telemetry');
     const $btnFlurry = document.getElementById('btnFlurry');
     const $btnHeavy = document.getElementById('btnHeavy');
@@ -73,12 +79,18 @@ export function createSnowDemo({ window, document, engine }) {
         $denVal.textContent = $den.value + '.0';
         $windVal.textContent = $wind.value;
         $gravVal.textContent = $grav.value;
+        $gustVal.textContent = $gust.value;
+        $turbVal.textContent = $turb.value;
+        $dragVal.textContent = $drag.value;
     }
 
     function applySliders() {
         engine.config.density = parseFloat($den.value);
         engine.config.wind = parseFloat($wind.value);
         engine.config.gravity = parseFloat($grav.value);
+        engine.config.gust = parseFloat($gust.value);
+        engine.config.turbulence = parseFloat($turb.value);
+        engine.config.drag = parseFloat($drag.value);
         syncLabels();
     }
 
@@ -97,6 +109,9 @@ export function createSnowDemo({ window, document, engine }) {
     on($den, 'input', applySliders);
     on($wind, 'input', applySliders);
     on($grav, 'input', applySliders);
+    on($gust, 'input', applySliders);
+    on($turb, 'input', applySliders);
+    on($drag, 'input', applySliders);
     on($btnFlurry, 'click', (e) => applyPreset(e.currentTarget, SNOW_PRESETS.flurry));
     on($btnHeavy, 'click', (e) => applyPreset(e.currentTarget, SNOW_PRESETS.heavy));
     on($btnBlizzard, 'click', (e) => applyPreset(e.currentTarget, SNOW_PRESETS.blizzard));
@@ -105,6 +120,9 @@ export function createSnowDemo({ window, document, engine }) {
     $den.value = String(engine.config.density);
     $wind.value = String(engine.config.wind);
     $grav.value = String(engine.config.gravity);
+    $gust.value = String(engine.config.gust);
+    $turb.value = String(engine.config.turbulence);
+    $drag.value = String(engine.config.drag);
     syncLabels();
     updateSize();
 

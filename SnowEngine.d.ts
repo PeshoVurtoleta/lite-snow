@@ -19,6 +19,33 @@ export interface SnowConfig {
     meltTimeMin?: number;
     /** Maximum melt time in seconds (settled flakes). Default: 5.0 */
     meltTimeMax?: number;
+    /**
+     * Global sinusoidal horizontal acceleration amplitude in px/s^2. The phase
+     * rides the shared _elapsedTime clock at gustFreq. 0 = off; when off the
+     * output is byte-identical to v1.1.1. A non-finite value (incl. null) fails
+     * closed to the default. Default: 0
+     */
+    gust?: number;
+    /**
+     * Gust angular frequency in rad/s. A non-finite value fails closed to the
+     * default. gustFreq === 0 with gust armed is a stated no-op: sin(0)*gust is 0
+     * forever, so the gust is frozen off (0 Hz means no oscillation). Default: TAU/3 (~2.094)
+     */
+    gustFreq?: number;
+    /**
+     * Per-flake rotating acceleration amplitude in px/s^2. Reuses each flake's
+     * driftPhase/driftSpeed (no new rng, no new column). 0 = off. A non-finite
+     * value (incl. null) fails closed to the default. Default: 0
+     */
+    turbulence?: number;
+    /**
+     * Terminal-velocity damping in [0, 1]. 1 = off (the positional base is
+     * untouched and output is byte-identical to v1.1.1). drag < 1 selects a
+     * SEPARATE integration model that folds gravity/wind into vx/vy and damps
+     * toward a terminal fall speed (see decisions/0002-living-air.md). A
+     * non-finite value (incl. null) fails closed to the default. Default: 1
+     */
+    drag?: number;
     /** Snow color as OKLCH object { l, c, h } or CSS string. Default: 'oklch(0.98 0.02 250)' */
     color?: { l: number; c: number; h: number } | string;
     /** Random number generator () => number [0, 1). Default: Math.random */
@@ -49,6 +76,10 @@ export declare class SnowEngine {
     driftAmp: Float32Array | null;
     life: Float32Array | null;
     state: Uint8Array | null;
+    /** Living-air perturbation velocity X (S5). Zero unless gust/turbulence/drag is armed. */
+    vx: Float32Array | null;
+    /** Living-air perturbation velocity Y (S5). Zero unless gust/turbulence/drag is armed. */
+    vy: Float32Array | null;
 
     /** Simulation clock in seconds, advanced by updateAndDraw(). @internal */
     _elapsedTime: number;
@@ -113,7 +144,7 @@ export declare class SnowEngine {
     clear(): void;
 
     /**
-     * Release all typed arrays -- the twelve SoA columns and the five render
+     * Release all typed arrays -- the fourteen SoA columns and the five render
      * bins -- and the config and colorStr references. Runs clear() first, so the
      * clock and counters are zeroed. Idempotent.
      */

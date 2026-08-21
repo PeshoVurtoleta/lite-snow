@@ -5,7 +5,7 @@
  *
  * Ported to node:test (S0). Two things changed and nothing else: the runner is
  * now `node:test` + `node:assert/strict`, and the SN-25 case
- * (`destroy nulls all 12 arrays`) now loops all twelve SoA column names instead
+ * (`destroy nulls all 14 arrays`) now loops all fourteen SoA column names instead
  * of spot-checking four. Every original assertion is preserved.
  */
 
@@ -127,15 +127,16 @@ describe('SnowEngine', () => {
         assert.equal(alive, 0);
     });
 
-    test('destroy nulls all 12 arrays', () => {
-        // SN-25: this test is named for twelve arrays and must exercise all
-        // twelve. The pre-S0 version asserted only x, gz, driftPhase and state,
+    test('destroy nulls all 14 arrays', () => {
+        // SN-25: this test is named for fourteen arrays and must exercise all
+        // fourteen (S5 added vx, vy). The pre-S0 version asserted only x, gz, driftPhase and state,
         // leaving eight columns (y, z, wz, bucket, radius, driftSpeed, driftAmp,
         // life) as a green light over a hole. Loop every SoA column name from
         // llms.txt:15 so the coverage cannot be trimmed back to four.
         const SOA_NAMES = [
             'x', 'y', 'z', 'gz', 'wz', 'bucket',
             'radius', 'driftPhase', 'driftSpeed', 'driftAmp', 'life', 'state',
+            'vx', 'vy',
         ];
         const e = new SnowEngine(100);
         e.destroy();
@@ -180,7 +181,7 @@ describe('boundary', () => {
     test('VERSION is exported and agrees with package.json (three-place sync)', () => {
         const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
         assert.equal(typeof VERSION, 'string');
-        assert.equal(VERSION, '1.1.1');
+        assert.equal(VERSION, '1.2.0');
         assert.equal(VERSION, pkg.version, 'VERSION const and package.json disagree');
     });
 
@@ -251,6 +252,7 @@ describe('S1 fail-closed door', () => {
     const SOA = [
         'x', 'y', 'z', 'gz', 'wz', 'bucket',
         'radius', 'driftPhase', 'driftSpeed', 'driftAmp', 'life', 'state',
+        'vx', 'vy',
     ];
 
     // Seeded xorshift32 -> [0,1). Deterministic across runs.
@@ -355,7 +357,7 @@ describe('S1 fail-closed door', () => {
         const e = new SnowEngine(200, { density: 100, rng: seeded(0x2468) });
         e.spawn(0.016, 800, 600);
         e.updateAndDraw(ctx, 0.05, 800, 600); // advance to a non-trivial state
-        // Twelve pre-allocated snapshots, taken once before the rejected frame.
+        // Fourteen pre-allocated snapshots, taken once before the rejected frame.
         const snap = {};
         for (const name of SOA) snap[name] = e[name].slice();
         const elapsedBefore = e._elapsedTime;
@@ -456,6 +458,7 @@ describe('S2 constructor, freeze, lifecycle, telemetry', () => {
     const SOA = [
         'x', 'y', 'z', 'gz', 'wz', 'bucket',
         'radius', 'driftPhase', 'driftSpeed', 'driftAmp', 'life', 'state',
+        'vx', 'vy',
     ];
 
     function seeded(seed) {
@@ -500,7 +503,7 @@ describe('S2 constructor, freeze, lifecycle, telemetry', () => {
     });
 
     test('clear() is a full reset: a cleared engine reproduces a fresh one bit-for-bit', () => {
-        // gravity is huge so every flake settles in one frame -> all 12 columns
+        // gravity is huge so every flake settles in one frame -> all 14 columns
         // are written for all 8 slots, leaving no stale free-slot data to differ.
         // x depends on _elapsedTime through the drift sway, so a clear() that does
         // not reset the clock diverges here (the named mutation).

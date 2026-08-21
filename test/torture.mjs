@@ -39,6 +39,7 @@ import { run as t6 } from './torture/t6-alloc.mjs';
 import { run as t7 } from './torture/t7-soak.mjs';
 import { run as t8 } from './torture/t8-cross.mjs';
 import { run as t9 } from './torture/t9-controls.mjs';
+import { run as t10 } from './torture/t10-armed.mjs';
 
 const TIERS = [
     ['T0 laws', t0],
@@ -51,6 +52,7 @@ const TIERS = [
     ['T7 soak', t7],
     ['T8 cross', t8],
     ['T9 controls', t9],
+    ['T10 armed', t10],
 ];
 
 function main() {

@@ -20,7 +20,7 @@ https://cdpn.io/pen/debug/yyapJqB
 | Feature | lite-snow | tsparticles | weatherJS | p5.js |
 |---|---|---|---|---|
 | **Zero-GC hot path** | **Yes** | No | No | No |
-| **SoA flat arrays** | **12 arrays** | No | No | No |
+| **SoA flat arrays** | **14 arrays** | No | No | No |
 | **Z-depth parallax** | **Yes (0.2-1.0)** | No | No | Manual |
 | **Sinusoidal drift** | **Per-flake** | Partial | No | Manual |
 | **Melt accumulation** | **Ellipse morph** | No | No | No |
@@ -345,10 +345,11 @@ Both are validated at construction and throw a `RangeError` naming the value:
 | `maxParticles` | integer, `1 <= n <= 10000000` |
 | `baseRadius` | finite, `> 0` |
 
-**Sizing.** The pool costs **58 bytes per particle** -- ten `Float32Array`
-columns at 4 bytes plus two `Uint8Array` columns at 1 byte (42 bytes of SoA
+**Sizing.** The pool costs **66 bytes per particle** -- twelve `Float32Array`
+columns at 4 bytes plus two `Uint8Array` columns at 1 byte (50 bytes of SoA
 state), plus four `Uint32Array` render-bin index lists at 4 bytes each (16 bytes).
-The default 10000 slots are 580 KB; the 10000000 ceiling is 580 MB. The ceiling
+The two velocity columns `vx`/`vy` (S5 living air) add +8 bytes over v1.1.1's 58.
+The default 10000 slots are 660 KB; the 10000000 ceiling is 660 MB. The ceiling
 exists so a typo fails loudly instead of attempting a multi-gigabyte allocation.
 The bin lists are allocated once at construction and rebuilt in place each frame,
 never reallocated.
@@ -360,7 +361,7 @@ never reallocated.
 | `.spawn(dt, w, h)` | Spawn new flakes. Auto-scales with area × density. |
 | `.updateAndDraw(ctx, dt, w, h)` | Physics + render. Does **not** clear canvas. |
 | `.clear()` | Full simulation reset: kills all particles, zeroes the drift clock, and invalidates the dimension cache. |
-| `.destroy()` | Nulls the 12 typed arrays, the config and the bucket table. Idempotent. |
+| `.destroy()` | Nulls the 14 typed arrays, the config and the render bins. Idempotent. |
 
 ### Telemetry
 
@@ -376,7 +377,7 @@ saturation; a pool pinned at capacity means `density` is outrunning the melt
 rate and new flakes are being silently dropped.
 
 Because they are maintained rather than counted, **writing `state[i]` directly
-desynchronises them.** The twelve SoA columns are public and you may read them
+desynchronises them.** The fourteen SoA columns are public and you may read them
 freely, but a slot's state is the engine's to change: go through `spawn()`,
 `clear()` or the melt lifecycle. `clear()` resynchronises from scratch.
 

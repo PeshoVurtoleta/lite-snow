@@ -1,6 +1,6 @@
 # @zakkster/lite-snow
 
-> Zero-GC SoA environmental snow engine. Drift physics, Z-depth parallax, ellipse accumulation, bucketed rendering. Zero dependencies.
+> Zero-GC SoA environmental snow engine. Drift physics, living-air forces (gust, turbulence, drag), Z-depth parallax, ellipse accumulation, bucketed rendering. Zero dependencies.
 
 ## Install
 npm i @zakkster/lite-snow
@@ -12,8 +12,9 @@ None. Zero runtime deps: OKLCH object -> CSS string is inlined in the engine.
 import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 
 ## Key Facts
-- 12 SoA arrays: x, y, z, gz, wz, bucket, radius, driftPhase, driftSpeed, driftAmp, life, state
+- 14 SoA arrays: x, y, z, gz, wz, bucket, radius, driftPhase, driftSpeed, driftAmp, life, state, vx, vy
 - Precomputed per-flake: gz[]=gravity*z, wz[]=wind*z, radius[]=base*z, driftAmp[]=amp*z, bucket[]
+- Living air (S5): gust (global sinusoidal horizontal accel, phase on the _elapsedTime clock), turbulence (per-flake rotating accel reusing driftPhase/driftSpeed, zero new rng), drag (terminal-velocity damping). All OFF by default; default output is byte-identical to v1.1.1. vx[]/vy[] carry the perturbation; drag !== 1 is a separate integration model (decisions/0002)
 - Two-phase lifecycle: flake(state=1) drifts down -> settles -> melt(state=2) as flat ellipse
 - Sinusoidal drift: per-flake random phase + speed + depth-scaled amplitude
 - Z-depth parallax (0.2-1.0): all physics/render params scale by depth
@@ -30,9 +31,9 @@ import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 - RNG injectable, no lite-random dep
 - Ring-cursor spawn (SN-12): persistent _spawnCursor wraps; a full wrap with no free slot fails closed (stops, never spins); clear() resets it
 - Melt alpha quantized into <= 8 bands so N melters batch into <= 8 fills (SN-06); melt y clamped to h on resize-shrink (SN-08)
-- destroy() nulls the 12 SoA arrays and the 4 render-bin lists AND releases config, colorStr; runs clear() first
+- destroy() nulls the 14 SoA arrays and the 4 render-bin lists AND releases config, colorStr; runs clear() first
 - Fail-closed door: non-finite or negative dt, or w/h <= 0, is a no-op frame (no clock advance, no state touch)
-- 58 bytes/particle: 42 SoA (10 Float32 x,y,z,gz,wz,radius,driftPhase,driftSpeed,driftAmp,life + 2 Uint8 bucket,state) + 16 for 4 Uint32 render-bin lists, allocated once, rebuilt in place each frame
+- 66 bytes/particle: 50 SoA (12 Float32 x,y,z,gz,wz,radius,driftPhase,driftSpeed,driftAmp,life,vx,vy + 2 Uint8 bucket,state) + 16 for 4 Uint32 render-bin lists, allocated once, rebuilt in place each frame. vx/vy add +8 B/particle over v1.1.1 (+80 KB at max 10000)
 - maxParticles ceiling MAX_PARTICLES = 10000000; a non-integer or out-of-range max throws RangeError before allocation
 - baseRadius must be a finite number > 0 or the constructor throws RangeError; radius[] clamped to MIN_RADIUS (0.01)
 - clear() is a full reset: pool, clock, dimension cache and telemetry counters
@@ -41,7 +42,7 @@ import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 - SNOW_PRESETS and each of .flurry/.heavy/.blizzard are Object.frozen
 
 ## API
-- VERSION: '1.1.1'
+- VERSION: '1.2.0'
 - new SnowEngine(maxParticles?, config?)
 - .spawn(dt, w, h) -- spawn new flakes
 - .updateAndDraw(ctx, dt, w, h) -- physics + render
@@ -52,7 +53,10 @@ import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 ## Config
 gravity (40), wind (30), density (10), baseRadius (2.5), driftAmplitude (15),
 driftFreq (1.0), meltTimeMin (2.0), meltTimeMax (5.0),
+gust (0), gustFreq (TAU/3), turbulence (0), drag (1 = off),
 color ('oklch(0.98 0.02 250)'), rng (Math.random)
+Each living-air knob fails closed: a non-finite value (incl. null) lands on its default, not on 0.
+gustFreq 0 with gust armed is a stated no-op: sin(0)*gust freezes the gust off (0 Hz = no oscillation).
 
 ## Presets
 SNOW_PRESETS.flurry -- gentle

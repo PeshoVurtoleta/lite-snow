@@ -4,7 +4,7 @@
  * Properties that must hold for ANY well-formed scene, checked over a seeded
  * schedule. These are the invariants every later session must preserve:
  *
- *   - Determinism: two engines, same seed, same frame schedule -> all twelve
+ *   - Determinism: two engines, same seed, same frame schedule -> all fourteen
  *     SoA arrays bit-identical.
  *   - Precompute identities: gz[i]=gravity*z[i], wz[i]=wind*z[i],
  *     driftAmp[i]=driftAmplitude*z[i] (f32-exact) for every live slot.
@@ -43,7 +43,7 @@
  */
 
 import { SnowEngine } from '../../SnowEngine.js';
-import { SEED, makeRng, check, makeMockCtx, conservation, spawnBoundHolds } from './harness.mjs';
+import { SEED, makeRng, check, makeMockCtx, conservation, spawnBoundHolds, SOA_NAMES } from './harness.mjs';
 import { spawnSync, execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -131,9 +131,8 @@ export function run() {
             () => `T0.conservation: pool not conserved at frame ${f} (seed=${SEED})`);
     }
 
-    // All twelve columns bit-identical between the two seeded engines.
-    const names = ['x', 'y', 'z', 'gz', 'wz', 'bucket',
-        'radius', 'driftPhase', 'driftSpeed', 'driftAmp', 'life', 'state'];
+    // All fourteen columns bit-identical between the two seeded engines.
+    const names = SOA_NAMES;
     for (let n = 0; n < names.length; n++) {
         const key = names[n];
         const arrA = a[key];

@@ -2,7 +2,7 @@
  * T4 -- lifecycle and hostile input.
  *
  * S2 fills this tier: every method is a safe no-op after destroy(), destroy()
- * releases config/colorStr and the four render-bin lists as well as the twelve
+ * releases config/colorStr and the four render-bin lists as well as the fourteen
  * SoA columns, a null or
  * malformed ctx is a no-op frame that never advances the clock, a draw call that
  * throws mid-render restores globalAlpha and RETHROWS while leaving the engine

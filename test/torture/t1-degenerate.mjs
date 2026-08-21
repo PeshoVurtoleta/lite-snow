@@ -28,7 +28,7 @@ function liveCount(e) {
     return n;
 }
 
-/** Snapshot the twelve SoA columns + the clock. Test-only; allocates freely. */
+/** Snapshot the fourteen SoA columns + the clock. Test-only; allocates freely. */
 function snapshot(e) {
     const s = { _t: e._elapsedTime };
     for (let n = 0; n < SOA_NAMES.length; n++) s[SOA_NAMES[n]] = e[SOA_NAMES[n]].slice();
@@ -156,7 +156,7 @@ export function run() {
         check(!moved || runDts[k] !== 0,
             () => `T1.dt: dt=0 moved a particle`);
     }
-    // No-op: non-finite / negative / non-number dt leaves all twelve arrays and
+    // No-op: non-finite / negative / non-number dt leaves all fourteen arrays and
     // the clock byte-for-byte unchanged, and draws nothing.
     const noopDts = [-1, NaN, Infinity, -Infinity, undefined, null, '0.016'];
     for (let k = 0; k < noopDts.length; k++) {

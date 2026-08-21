@@ -1,15 +1,22 @@
 /**
- * @zakkster/lite-snow v1.1.1
+ * @zakkster/lite-snow v1.2.0
  * Zero-GC, SoA Environmental Snow Engine
  * Drift physics, Z-depth parallax, ellipse accumulation, bin-driven rendering, 3 presets.
  */
 
-export const VERSION = '1.1.1';
+export const VERSION = '1.2.0';
 
 const TAU = Math.PI * 2;
 const DT_MAX = 0.1;
 const MAX_PARTICLES = 10000000;
 const MIN_RADIUS = 0.01;
+
+// Default global gust frequency (rad/s): one full horizontal swing every ~3s.
+const GUST_FREQ_DEF = TAU / 3;
+// Fail-closed force cap (px/s^2). Every acceleration component fed into vx/vy is
+// clamped to +/- this before integration, so velocity growth stays LINEAR and
+// positions stay finite for ANY finite gust/turbulence input (decisions/0002).
+const ACCEL_MAX = 10000;
 
 // Melt render is batched into MELT_BINS alpha bands: at most one beginPath/fill
 // pair per band instead of one per particle (SN-06). Fill count per frame is
@@ -41,16 +48,29 @@ export class SnowEngine {
             baseRadius: 2.5,      
             driftAmplitude: 15,   
             driftFreq: 1.0,       
-            meltTimeMin: 2.0,     
-            meltTimeMax: 5.0,     
-            color: 'oklch(0.98 0.02 250)', 
-            rng: Math.random,     
+            meltTimeMin: 2.0,
+            meltTimeMax: 5.0,
+            gust: 0,
+            gustFreq: GUST_FREQ_DEF,
+            turbulence: 0,
+            drag: 1,
+            color: 'oklch(0.98 0.02 250)',
+            rng: Math.random,
             ...config
         };
 
         if (!Number.isFinite(this.config.baseRadius) || this.config.baseRadius <= 0) {
             throw new RangeError('lite-snow: baseRadius must be a finite number > 0, got ' + String(this.config.baseRadius));
         }
+
+        // Fail closed at the door: each living-air knob coerces non-finite (incl.
+        // null and undefined) to its DEFAULT, not to 0. null is not zero -- a null
+        // gust must land on the inert default so the guards stay provably off.
+        const cfg = this.config;
+        cfg.gust = Number.isFinite(cfg.gust) ? cfg.gust : 0;
+        cfg.gustFreq = Number.isFinite(cfg.gustFreq) ? cfg.gustFreq : GUST_FREQ_DEF;
+        cfg.turbulence = Number.isFinite(cfg.turbulence) ? cfg.turbulence : 0;
+        cfg.drag = Number.isFinite(cfg.drag) ? cfg.drag : 1;
 
         this.colorStr = typeof this.config.color === 'string' ? this.config.color : this._cssOklch(this.config.color);
 
@@ -66,8 +86,16 @@ export class SnowEngine {
         this.driftSpeed = new Float32Array(this.max); 
         this.driftAmp = new Float32Array(this.max); 
 
-        this.life = new Float32Array(this.max); 
-        this.state = new Uint8Array(this.max);  
+        this.life = new Float32Array(this.max);
+        this.state = new Uint8Array(this.max);
+
+        // Living-air velocity (S5). On the default path vx/vy carry ONLY the
+        // gust + turbulence perturbation, added on top of the positional base,
+        // and are zero unless a force is armed. drag !== 1 takes a separate
+        // branch that folds gz/wz into these and integrates from them
+        // (decisions/0002). 14 columns now, 66 B/particle.
+        this.vx = new Float32Array(this.max);
+        this.vy = new Float32Array(this.max);
         
         this._elapsedTime = 0;
         this._nFalling = 0;
@@ -148,6 +176,7 @@ export class SnowEngine {
         const state = this.state, x = this.x, y = this.y, z = this.z;
         const gz = this.gz, wz = this.wz, bucket = this.bucket, radius = this.radius;
         const driftPhase = this.driftPhase, driftSpeed = this.driftSpeed, driftAmp = this.driftAmp;
+        const vx = this.vx, vy = this.vy;
 
         // Ring cursor: probe at most `max` slots starting where the last spawn
         // left off, filling free ones until the cap is met. A full wrap that
@@ -163,6 +192,11 @@ export class SnowEngine {
 
             state[i] = 1;
             this._nFalling++;
+
+            // Load-bearing: slots recycle through the ring cursor, so a reused
+            // slot must not inherit a dead flake's perturbation velocity.
+            vx[i] = 0;
+            vy[i] = 0;
 
             x[i] = rng() * (w + windOffset * 2) - windOffset;
             y[i] = -50 - rng() * 50;
@@ -204,6 +238,19 @@ export class SnowEngine {
         const gz = this.gz, wz = this.wz, bucket = this.bucket, radius = this.radius;
         const driftPhase = this.driftPhase, driftSpeed = this.driftSpeed;
         const driftAmp = this.driftAmp, life = this.life;
+        const vx = this.vx, vy = this.vy;
+
+        // Living-air knobs, read ONCE above the loop (SN-14). Each armed block is
+        // guarded by a hoisted flag so an unarmed engine pays only the branch
+        // bytes. gust is GLOBAL, so its acceleration is computed once here, not
+        // per particle -- its phase is the shared _elapsedTime clock.
+        const gust = this.config.gust;
+        const turbulence = this.config.turbulence;
+        const drag = this.config.drag;
+        const gustOn = gust !== 0;
+        const turbOn = turbulence !== 0;
+        const dragOn = drag !== 1;
+        const gustAccel = gustOn ? Math.sin(et * this.config.gustFreq) * gust : 0;
 
         const bin0 = this._bin0, bin1 = this._bin1, bin2 = this._bin2, binMelt = this._binMelt;
         const meltAlphaCount = this._meltAlphaCount;
@@ -217,10 +264,42 @@ export class SnowEngine {
             if (s === 0) continue;
 
             if (s === 1) {
-                const sway = Math.sin(et * driftSpeed[i] + driftPhase[i]) * driftAmp[i];
+                const tp = et * driftSpeed[i] + driftPhase[i];
+                const sway = Math.sin(tp) * driftAmp[i];
 
-                x[i] += (wz[i] + sway) * dt;
-                y[i] += gz[i] * dt;
+                if (dragOn) {
+                    // SEPARATE integration model (decisions/0002): fold the base
+                    // gravity/wind and any perturbation into velocity, damp by
+                    // drag toward a terminal velocity, then integrate position.
+                    // Off by default (drag === 1), so this never runs unarmed.
+                    let ax = wz[i] + sway;
+                    let ay = gz[i];
+                    if (gustOn) ax += gustAccel;
+                    if (turbOn) { ax += Math.cos(tp) * turbulence; ay += Math.sin(tp) * turbulence; }
+                    if (ax > ACCEL_MAX) ax = ACCEL_MAX; else if (ax < -ACCEL_MAX) ax = -ACCEL_MAX;
+                    if (ay > ACCEL_MAX) ay = ACCEL_MAX; else if (ay < -ACCEL_MAX) ay = -ACCEL_MAX;
+                    vx[i] = (vx[i] + ax * dt) * drag;
+                    vy[i] = (vy[i] + ay * dt) * drag;
+                    x[i] += vx[i] * dt;
+                    y[i] += vy[i] * dt;
+                } else {
+                    // POSITIONAL base -- byte-identical to v1.1.1 when no force is
+                    // armed. vx/vy carry ONLY the gust + turbulence perturbation,
+                    // added on top; both are zero unless a force is armed.
+                    x[i] += (wz[i] + sway) * dt;
+                    y[i] += gz[i] * dt;
+                    if (gustOn || turbOn) {
+                        let ax = gustOn ? gustAccel : 0;
+                        let ay = 0;
+                        if (turbOn) { ax += Math.cos(tp) * turbulence; ay += Math.sin(tp) * turbulence; }
+                        if (ax > ACCEL_MAX) ax = ACCEL_MAX; else if (ax < -ACCEL_MAX) ax = -ACCEL_MAX;
+                        if (ay > ACCEL_MAX) ay = ACCEL_MAX; else if (ay < -ACCEL_MAX) ay = -ACCEL_MAX;
+                        vx[i] += ax * dt;
+                        vy[i] += ay * dt;
+                        x[i] += vx[i] * dt;
+                        y[i] += vy[i] * dt;
+                    }
+                }
 
                 // Off-screen culling (X-axis wind leak AND Y-axis negative gravity leak)
                 if (!(x[i] >= -200 && x[i] <= w + 200 && y[i] >= -200)) {
@@ -328,6 +407,7 @@ export class SnowEngine {
         this.wz = null; this.bucket = null; this.radius = null;
         this.driftPhase = null; this.driftSpeed = null; this.driftAmp = null;
         this.life = null; this.state = null;
+        this.vx = null; this.vy = null;
         this._bin0 = null; this._bin1 = null; this._bin2 = null;
         this._binMelt = null; this._meltAlphaCount = null;
         this.config = null; this.colorStr = null;

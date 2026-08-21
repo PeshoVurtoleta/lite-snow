@@ -170,7 +170,8 @@ function makeFakeDocument(registry) {
     canvas.getContext = () => makeFakeCtx();
 
     const ids = [
-        'density', 'wind', 'gravity', 'denVal', 'windVal', 'gravVal',
+        'density', 'wind', 'gravity', 'gust', 'turbulence', 'drag',
+        'denVal', 'windVal', 'gravVal', 'gustVal', 'turbVal', 'dragVal',
         'telemetry', 'btnFlurry', 'btnHeavy', 'btnBlizzard',
     ];
     const elements = new Map();
@@ -203,7 +204,7 @@ function makeFakeWindow(registry, raf, ResizeObserverClass) {
 
 function makeStubEngine() {
     return {
-        config: { density: 10, wind: 30, gravity: 40 },
+        config: { density: 10, wind: 30, gravity: 40, gust: 0, turbulence: 0, drag: 1 },
         spawnCalls: 0,
         updateAndDrawCalls: 0,
         destroyCalls: 0,
