@@ -21,6 +21,7 @@
  * @license MIT
  */
 
+import { createHash } from 'node:crypto';
 import { measureOps, checkNoGc } from '@zakkster/lite-gc-profiler';
 
 /** Seed for every PRNG in the run. Override with TORTURE_SEED for replay. */
@@ -127,6 +128,8 @@ export class MockCtx {
         // Draw-call counters.
         this.nBeginPath = 0;
         this.nMoveTo = 0;
+        this.nLineTo = 0;
+        this.nClosePath = 0;
         this.nArc = 0;
         this.nEllipse = 0;
         this.nFill = 0;
@@ -153,6 +156,11 @@ export class MockCtx {
 
     beginPath() { this.nBeginPath++; }
     moveTo(x, y) { this.nMoveTo++; }
+    // lineTo/closePath: the accumulation pack (S6) is one closed polygon fill, so
+    // the mock must implement them or an armed render throws mid-frame. They never
+    // fire on the default (unarmed) path, so no existing count moves.
+    lineTo(x, y) { this.nLineTo++; }
+    closePath() { this.nClosePath++; }
     // arc() and ellipse() reproduce the ONE input the real
     // CanvasRenderingContext2D rejects: a negative radius is an IndexSizeError.
     // Without this the mock silently accepts geometry a real canvas refuses, and
@@ -183,8 +191,8 @@ export class MockCtx {
 
     /** Zero every counter and accumulator in place. No allocation. */
     reset() {
-        this.nBeginPath = 0; this.nMoveTo = 0; this.nArc = 0;
-        this.nEllipse = 0; this.nFill = 0;
+        this.nBeginPath = 0; this.nMoveTo = 0; this.nLineTo = 0; this.nClosePath = 0;
+        this.nArc = 0; this.nEllipse = 0; this.nFill = 0;
         this.nFillStyle = 0; this.nGlobalAlpha = 0;
         this.nClearRect = 0; this.nSave = 0; this.nRestore = 0;
         this.nSetTransform = 0; this.nScale = 0;
@@ -195,6 +203,60 @@ export class MockCtx {
 /** Convenience factory so tiers can read as `makeMockCtx()`. */
 export function makeMockCtx() {
     return new MockCtx();
+}
+
+/** Opcode bytes for the ordered ctx-call-sequence digest. The first seven are
+ * FROZEN -- they are the encoding the committed CTX_SEQ_DIGEST_DEFAULT was
+ * captured under (the S6 pre-flight recorder). lineTo/closePath were appended for
+ * the S6 pack polygon; they never fire on the default path, so the default digest
+ * is unchanged. */
+const CTX_OP = Object.freeze({
+    fillStyle: 1, globalAlpha: 2, beginPath: 3, moveTo: 4,
+    arc: 5, ellipse: 6, fill: 7, lineTo: 8, closePath: 9,
+});
+
+/**
+ * Ordered ctx-call-sequence recorder: opcode byte + exact f64 argument bits per
+ * call, folded into a rolling sha256. The existing MockCtx digests unordered
+ * COUNTERS (nArc, sumX), which cannot see a reordering that preserves sums; this
+ * pins ORDER and ARGUMENTS. The default-path digest is committed as
+ * CTX_SEQ_DIGEST_DEFAULT in armed-scenario.mjs -- proven discriminating (a
+ * gust:40 run yields a different hex). arc()/ellipse() reproduce the real
+ * canvas's negative-radius IndexSizeError so the recorder is not more permissive
+ * than a browser. Test-only -- allocates freely (never a gated hot body).
+ */
+export class CtxSeqRecorder {
+    constructor() {
+        this.h = createHash('sha256');
+        this.buf = Buffer.allocUnsafe(8);
+        this._fillStyle = '';
+        this._globalAlpha = 1;
+        this.nArc = 0; this.nEllipse = 0; this.nFill = 0; this.nBeginPath = 0;
+        this.nMoveTo = 0; this.nLineTo = 0; this.nClosePath = 0;
+    }
+    _op(c) { this.buf.writeUInt8(c, 0); this.h.update(this.buf.subarray(0, 1)); }
+    _f(v) { this.buf.writeDoubleLE(v, 0); this.h.update(this.buf); }
+    get fillStyle() { return this._fillStyle; }
+    set fillStyle(v) { this._fillStyle = v; this._op(CTX_OP.fillStyle); this.h.update(String(v)); }
+    get globalAlpha() { return this._globalAlpha; }
+    set globalAlpha(v) { this._globalAlpha = v; this._op(CTX_OP.globalAlpha); this._f(v); }
+    beginPath() { this.nBeginPath++; this._op(CTX_OP.beginPath); }
+    moveTo(x, y) { this.nMoveTo++; this._op(CTX_OP.moveTo); this._f(x); this._f(y); }
+    lineTo(x, y) { this.nLineTo++; this._op(CTX_OP.lineTo); this._f(x); this._f(y); }
+    closePath() { this.nClosePath++; this._op(CTX_OP.closePath); }
+    arc(x, y, r, a0, a1) {
+        if (r < 0) throw new RangeError('IndexSizeError: negative radius ' + r);
+        this.nArc++; this._op(CTX_OP.arc);
+        this._f(x); this._f(y); this._f(r); this._f(a0); this._f(a1);
+    }
+    ellipse(x, y, rx, ry, rot, a0, a1) {
+        if (rx < 0 || ry < 0) throw new RangeError('IndexSizeError: negative radius ' + rx + ',' + ry);
+        this.nEllipse++; this._op(CTX_OP.ellipse);
+        this._f(x); this._f(y); this._f(rx); this._f(ry); this._f(rot); this._f(a0); this._f(a1);
+    }
+    fill() { this.nFill++; this._op(CTX_OP.fill); }
+    /** Finalize the rolling hash. Call ONCE -- createHash cannot be re-read. */
+    digest() { return this.h.digest('hex'); }
 }
 
 /**
@@ -230,6 +292,68 @@ export function conservation(engine) {
         else return false; // a state outside {0,1,2} is corruption
     }
     return free + falling + melting === max;
+}
+
+/**
+ * The live sum of the accumulation heightmap -- one INDEPENDENT walk of the pack
+ * array. Returns 0 for an unarmed engine (pack === null). This is the LEFT side
+ * of the (a) conservation identity; it is computed here and NOWHERE reused to
+ * derive the right side, so packConservation() cannot agree with itself (A11).
+ * O(nCols) -- test only.
+ * @returns {number}
+ */
+export function packSum(engine) {
+    const pack = engine.pack;
+    if (pack === null) return 0;
+    const cols = engine._packCols;
+    let s = 0;
+    for (let c = 0; c < cols; c++) s += pack[c];
+    return s;
+}
+
+/**
+ * The exact-integer pack conservation identity (decisions/0003 (a)) as its TWO
+ * INDEPENDENT sides:
+ *   lhs = sum(pack[c])                                    -- an array walk
+ *   rhs = _packLanded*PACK_GAIN - _packDecayed - _packCapped - _packTruncated
+ *                                                         -- the ledger scalars
+ * `ok` is `lhs === rhs` (integer equality, no epsilon). The two sides share no
+ * computation: a frozen NoDecayEngine that still increments _packDecayed while
+ * skipping the array decrement must make `ok` FALSE (A11), which a same-walk
+ * helper could never do. PACK_GAIN is 1 (the engine constant); passed here as the
+ * default so the helper needs no import from the module under test.
+ * @returns {{lhs:number, rhs:number, ok:boolean}}
+ */
+export function packConservation(engine, packGain) {
+    const g = packGain === undefined ? 1 : packGain;
+    const lhs = packSum(engine);
+    const rhs = engine._packLanded * g - engine._packDecayed - engine._packCapped - engine._packTruncated;
+    return { lhs, rhs, ok: lhs === rhs };
+}
+
+/**
+ * The pack must MELT: with the snow stopped (no spawn) a decaying pack must reach
+ * 0. Conservation (packConservation) CANNOT prove this -- it only counts what the
+ * decay loop actually decremented, so a decay domain narrower than the raise
+ * domain (columns raised but never decayed) keeps an exact ledger while the pile
+ * is permanent. This walks it directly: fill a pack, drain every live flake, then
+ * step `frames` frames WITHOUT spawning at (dt, w, h) and return the final
+ * packSum. A correct engine reaches 0; the pre-fix engine (decay bounded by
+ * min(nCols, ceil(w*invPackRes)) while raise spans nCols) leaves the off-window
+ * columns non-zero forever, so packSum plateaus above 0. Mutates `engine`.
+ * Test-only. RED WHEN: the decay loop iterates fewer than nCols columns.
+ * @returns {{ residual:number, decreased:boolean }}
+ */
+export function packMeltsToZero(engine, ctx, dt, w, h, spawnFrames, drainFrames) {
+    for (let f = 0; f < spawnFrames; f++) { engine.spawn(dt, w, h); engine.updateAndDraw(ctx, dt, w, h); }
+    // Drain: no more spawning; run until no live flake remains (or a hard cap).
+    for (let f = 0; f < 100000 && (engine._nFalling + engine._nMelting) > 0; f++) {
+        engine.updateAndDraw(ctx, dt, w, h);
+    }
+    const before = packSum(engine);
+    for (let f = 0; f < drainFrames; f++) engine.updateAndDraw(ctx, dt, w, h);
+    const residual = packSum(engine);
+    return { residual, decreased: residual < before };
 }
 
 /**
@@ -297,8 +421,8 @@ export function clearIsFullReset(engine, ctx) {
 }
 
 /**
- * destroy() must release EVERYTHING: the fourteen SoA columns, `config`,
- * `colorStr` and the five render bins all null, the clock and both
+ * destroy() must release EVERYTHING: the fourteen SoA columns, the accumulation
+ * `pack` (S6), `config`, `colorStr` and the five render bins all null, the clock and both
  * dimension-cache fields and both counters zeroed (via the clear() it runs
  * FIRST, before the flag), and `_destroyed` true. Calls destroy() on `engine`,
  * so pass a live one. A destroy that sets the flag before clear() (T9 control 8)
@@ -314,6 +438,7 @@ export function destroyReleasesAll(engine) {
     if (engine.colorStr !== null) return false;
     if (engine._bin0 !== null || engine._bin1 !== null || engine._bin2 !== null) return false;
     if (engine._binMelt !== null || engine._meltAlphaCount !== null) return false;
+    if (engine.pack !== null) return false; // S6 accumulation heightmap, nulled by destroy()
     if (engine._elapsedTime !== 0) return false;
     if (engine._lastW !== 0 || engine._lastH !== 0 || engine._areaModifier !== 0) return false;
     if (engine._nFalling !== 0 || engine._nMelting !== 0) return false;

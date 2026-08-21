@@ -3,6 +3,56 @@
 All notable changes to `@zakkster/lite-snow` are documented here. The format
 follows Keep a Changelog, and the project adheres to Semantic Versioning.
 
+## [1.3.0] - 2026-08-21
+
+Session S6. Accumulation and friction. `accumulate: true` builds a persistent
+`Uint16Array` heightmap (`pack`) that settled flakes land ON and that decays over
+time. It is **opt-in and OFF by default**: with `accumulate: false` the pre-1.3.0
+melt ellipse is the default behaviour and `spawn()`/`updateAndDraw()` are
+BYTE-IDENTICAL to 1.2.0 -- proven both by the committed 12-column determinism hash
+`f2e3ccef...ef15` AND by a new ORDERED ctx-call-sequence digest
+`0886e3df...2ca2d` (opcode + f64 argument bits, so a reordering that preserves
+sums cannot hide). See `decisions/0003-accumulation.md`.
+
+### Added
+
+- **`accumulate` (default false)** -- CONSTRUCTION-TIME only: arms strictly on
+  `=== true`; a runtime flip of `config.accumulate` is inert (no allocation, no
+  behaviour change). When off, `pack === null`.
+- **The `pack` heightmap** -- `Uint16Array(maxPackWidth / packResolution)`,
+  allocated once and only when armed, a SEPARATE fixed cost (not per-particle;
+  default 1024 cols = 2 KB). Never reallocated; a resize truncates in place;
+  nulled by `destroy()`.
+- **`packResolution` (4)**, **`maxPackWidth` (4096)**, **`maxPackHeight` (200)**
+  -- when armed, each must be an integer in its range (`[1,256]`,
+  `[packResolution,16384]`, `[1,65535]`) or the constructor throws `RangeError`
+  naming the value.
+- **`packDecay` (2.0 packUnits/s)** -- integer-stepped decay; the whole integer
+  part of the accumulator drains each frame, over all pack columns -- a fixed
+  bound that covers the full raise domain, never the particle pool. Non-finite
+  fails closed to the default; negative coerces to 0.
+- **`floorY` (null)** -- settle floor; `null` tracks the per-frame `h`, a finite
+  value is used raw (e.g. an overlay HUD bar). Non-finite fails closed to `null`.
+- **`friction` (0)** -- contact-frame `vx` damp applied once at the settle
+  transition; clamped to `[0,1]`, negative coerces to 0 (never anti-friction).
+
+### Design
+
+- **Exact integer conservation.** `packSum === _packLanded * PACK_GAIN -
+  _packDecayed - _packCapped - _packTruncated` holds every frame with NO epsilon
+  -- an f32 "to within rounding" identity was rejected as flaky.
+- **Fail closed by SKIPPING, not clamping.** An out-of-domain column (spawn
+  overhang, wind past `w`) settles at `floorY` and raises nothing; clamping to an
+  edge column would build a false wall.
+- **No new state, no new SoA column.** Accumulation reuses state 2; the pack
+  height is raised ONCE, at the `1 -> 2` transition, so the flake's contribution
+  outlives its recycled slot. The melt ellipse is still drawn, on top of the pack.
+- **One extra fill.** The pack renders as a single closed-path fill, before the
+  melt bands, only when non-empty: `3 depth-bucket fills + [0..1] pack + up to 8
+  melt-band fills` per frame.
+- **`settle` REJECTED.** Snow settles on first contact and has no rebound `vy`, so
+  a rest-velocity threshold would be a global on/off dressed as a threshold.
+
 ## [1.2.0] - 2026-08-21
 
 Session S5. Living air: `gust`, `turbulence` and `drag`. All three are OFF by
@@ -499,6 +549,7 @@ non-fatal known-issue reproductions so they are visible on every run.
   Repro: `e.spawn(0.016,800,600); e.updateAndDraw(ctx,-1,800,600)` ->
   `e._elapsedTime` is negative and the live count drops.
 
+[1.3.0]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.3.0
 [1.2.0]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.2.0
 [1.1.1]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.1.1
 [1.1.0]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.1.0

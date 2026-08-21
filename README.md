@@ -10,7 +10,7 @@
 ![Dependencies](https://img.shields.io/badge/dependencies-0-brightgreen)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 
-Zero-GC SoA environmental snow engine with drift physics, Z-depth parallax, ellipse accumulation, and bucketed rendering. Zero dependencies. 3 presets. 213 lines.
+Zero-GC SoA environmental snow engine with drift physics, Z-depth parallax, opt-in persistent-pack accumulation, and bucketed rendering. Zero dependencies. 3 presets.
 
 ## Live Demo
 https://cdpn.io/pen/debug/yyapJqB
@@ -23,7 +23,7 @@ https://cdpn.io/pen/debug/yyapJqB
 | **SoA flat arrays** | **14 arrays** | No | No | No |
 | **Z-depth parallax** | **Yes (0.2-1.0)** | No | No | Manual |
 | **Sinusoidal drift** | **Per-flake** | Partial | No | Manual |
-| **Melt accumulation** | **Ellipse morph** | No | No | No |
+| **Snow accumulation** | **Persistent pack + ellipse morph** | No | No | No |
 | **Bucketed rendering** | **3 tiers** | No | No | No |
 | **Built-in presets** | **3** | Config-heavy | No | No |
 | **OKLCH color** | **Yes** | No | No | No |
@@ -113,6 +113,8 @@ When a flake reaches the floor (`y >= h`), it transitions to a settled state:
 
 This creates a subtle accumulation layer at the bottom of the canvas -- flakes don't just disappear, they settle and melt.
 
+With `accumulate: true` (opt-in, construction-time only), settled flakes also raise a **persistent pack**: a `Uint16Array` heightmap, one column per `packResolution` px, that flakes land ON and that decays over time. It is an exact integer ledger (`packSum === landed - decayed - capped - truncated`), caps each column at `maxPackHeight`, skips out-of-range columns rather than clamping them into a false wall, and truncates on resize. Off by default, the engine is byte-identical to v1.2.0 and `pack === null`.
+
 ### Bucketed Rendering
 
 Flakes are binned into 3 depth tiers at spawn:
@@ -126,7 +128,8 @@ Flakes are binned into 3 depth tiers at spawn:
 Each depth bucket renders in **one batched `ctx.fill()` call**. Melting flakes are
 quantized into at most 8 alpha bands, each drawn in a single `fill()` -- so a full
 frame is **3 depth-bucket fills plus up to 8 melt-band fills** (`3 + 8` worst case),
-independent of how many flakes are on screen. The physics pass bins every live
+plus **one closed-path pack fill** when `accumulate: true` and the pack is non-empty
+(`3 + 1 + 8` worst case), independent of how many flakes are on screen. The physics pass bins every live
 flake into preallocated index lists in one sweep, so the render touches only live
 slots, never the whole pool.
 
@@ -353,6 +356,11 @@ The default 10000 slots are 660 KB; the 10000000 ceiling is 660 MB. The ceiling
 exists so a typo fails loudly instead of attempting a multi-gigabyte allocation.
 The bin lists are allocated once at construction and rebuilt in place each frame,
 never reallocated.
+
+The accumulation `pack` (S6) is a **separate fixed cost, not per-particle**: one
+`Uint16Array` of `maxPackWidth / packResolution` columns (default `4096 / 4 = 1024`
+cells = 2 KB), allocated once and only when `accumulate: true`, never reallocated
+(a resize truncates it in place). Unarmed, `pack === null` and costs nothing.
 
 ### Methods
 

@@ -1,10 +1,10 @@
 /**
- * @zakkster/lite-snow v1.2.0
+ * @zakkster/lite-snow v1.3.0
  * Zero-GC, SoA Environmental Snow Engine
- * Drift physics, Z-depth parallax, ellipse accumulation, bin-driven rendering, 3 presets.
+ * Drift physics, Z-depth parallax, persistent-pack accumulation, bin-driven rendering, 3 presets.
  */
 
-export const VERSION = '1.2.0';
+export const VERSION = '1.3.0';
 
 const TAU = Math.PI * 2;
 const DT_MAX = 0.1;
@@ -20,7 +20,8 @@ const ACCEL_MAX = 10000;
 
 // Melt render is batched into MELT_BINS alpha bands: at most one beginPath/fill
 // pair per band instead of one per particle (SN-06). Fill count per frame is
-// exactly 3 depth buckets + the number of melt bands actually populated.
+// exactly 3 depth buckets + (1 if the accumulation pack is non-empty) + the
+// number of melt bands actually populated.
 const MELT_BINS = 8;
 const MELT_BIN_STEP = 1 / MELT_BINS; // 0.125; band b renders at (b + 0.5) * step
 // A live slot index (< MAX_PARTICLES < 2**24) is packed into the low 24 bits of
@@ -34,6 +35,18 @@ const MELT_BIN_SHIFT = 24;
 const BUCKET0_ALPHA = 0.24;
 const BUCKET1_ALPHA = 0.44;
 const BUCKET2_ALPHA = 0.72;
+
+// Accumulation (S6). The pack is a Uint16Array heightmap: one column per
+// packResolution px, each cell an integer count of packUnits. A landing adds
+// PACK_GAIN; a per-frame integer-stepped decay removes it. It is an EXACT
+// integer ledger (decisions/0003), never an f32 identity. Off by default
+// (accumulate !== true), when off `pack === null` and nothing here is read.
+const PACK_GAIN = 1;              // integer volume one landing adds to its column
+const PACK_RES_MAX = 256;         // packResolution ceiling (px per column)
+const PACK_WIDTH_MAX = 16384;     // maxPackWidth ceiling (px), grow-on-resize rejected
+const PACK_HEIGHT_MAX = 65535;    // maxPackHeight ceiling = Uint16 max (AD-2)
+const PACK_DECAY_DEF = 2.0;       // default decay rate (packUnits/s)
+const PACK_ALPHA = 0.9;           // the single pack fill's globalAlpha
 
 export class SnowEngine {
     constructor(maxParticles = 10000, config = {}) {
@@ -54,6 +67,13 @@ export class SnowEngine {
             gustFreq: GUST_FREQ_DEF,
             turbulence: 0,
             drag: 1,
+            accumulate: false,
+            packResolution: 4,
+            maxPackWidth: 4096,
+            maxPackHeight: 200,
+            packDecay: PACK_DECAY_DEF,
+            floorY: null,
+            friction: 0,
             color: 'oklch(0.98 0.02 250)',
             rng: Math.random,
             ...config
@@ -61,6 +81,27 @@ export class SnowEngine {
 
         if (!Number.isFinite(this.config.baseRadius) || this.config.baseRadius <= 0) {
             throw new RangeError('lite-snow: baseRadius must be a finite number > 0, got ' + String(this.config.baseRadius));
+        }
+
+        // Accumulation is CONSTRUCTION-TIME only (decisions/0003 (e)): the strict
+        // `=== true` is the arm -- 'yes'/1/{} do not arm it, and a runtime flip of
+        // config.accumulate is inert. The pack columns are validated ONLY when
+        // armed; unarmed they stay at their (irrelevant) defaults and nothing
+        // reads them.
+        this._packOn = this.config.accumulate === true;
+        if (this._packOn) {
+            const pr = this.config.packResolution;
+            if (!Number.isInteger(pr) || pr < 1 || pr > PACK_RES_MAX) {
+                throw new RangeError('lite-snow: packResolution must be an integer 1..256, got ' + String(pr));
+            }
+            const pw = this.config.maxPackWidth;
+            if (!Number.isInteger(pw) || pw < pr || pw > PACK_WIDTH_MAX) {
+                throw new RangeError('lite-snow: maxPackWidth must be an integer packResolution..16384, got ' + String(pw));
+            }
+            const ph = this.config.maxPackHeight;
+            if (!Number.isInteger(ph) || ph < 1 || ph > PACK_HEIGHT_MAX) {
+                throw new RangeError('lite-snow: maxPackHeight must be an integer 1..65535, got ' + String(ph));
+            }
         }
 
         // Fail closed at the door: each living-air knob coerces non-finite (incl.
@@ -71,6 +112,16 @@ export class SnowEngine {
         cfg.gustFreq = Number.isFinite(cfg.gustFreq) ? cfg.gustFreq : GUST_FREQ_DEF;
         cfg.turbulence = Number.isFinite(cfg.turbulence) ? cfg.turbulence : 0;
         cfg.drag = Number.isFinite(cfg.drag) ? cfg.drag : 1;
+
+        // Accumulation/friction knobs fail closed at the door (decisions/0003 (c),
+        // AD-3). floorY: null is the "track h" sentinel, so any non-finite value
+        // lands on null (never 0 = the canvas TOP). friction clamps to [0,1] with
+        // negative -> 0 (never anti-friction). packDecay coerces non-finite to its
+        // DEFAULT (null is not "never decay"), and a NEGATIVE decay -> 0 (a pack
+        // that grows from nothing is not a thing).
+        cfg.floorY = Number.isFinite(cfg.floorY) ? cfg.floorY : null;
+        cfg.friction = Number.isFinite(cfg.friction) ? (cfg.friction < 0 ? 0 : cfg.friction > 1 ? 1 : cfg.friction) : 0;
+        cfg.packDecay = Number.isFinite(cfg.packDecay) ? (cfg.packDecay < 0 ? 0 : cfg.packDecay) : PACK_DECAY_DEF;
 
         this.colorStr = typeof this.config.color === 'string' ? this.config.color : this._cssOklch(this.config.color);
 
@@ -96,7 +147,28 @@ export class SnowEngine {
         // (decisions/0002). 14 columns now, 66 B/particle.
         this.vx = new Float32Array(this.max);
         this.vy = new Float32Array(this.max);
-        
+
+        // Accumulation heightmap (S6), sized ONCE and only when armed. nCols is
+        // maxPackWidth/packResolution columns (default 1024 -> 2 KB). It is NOT
+        // per-particle: a separate fixed cost that never grows and is never
+        // reallocated (grow-on-resize rejected -- decisions/0003). Unarmed:
+        // pack === null and every pack field is null/0.
+        const nCols = this._packOn ? Math.floor(this.config.maxPackWidth / this.config.packResolution) : 0;
+        this.pack = this._packOn ? new Uint16Array(nCols) : null;
+        this._packCols = nCols;
+        this._invPackRes = this._packOn ? 1 / this.config.packResolution : 0;
+        // Integer ledger (decisions/0003 (a)). Every term is an exact integer, so
+        // packSum === _packLanded*PACK_GAIN - _packDecayed - _packCapped -
+        // _packTruncated holds with no epsilon. _packActive is the count of
+        // non-zero columns -- a render gate, not a ledger term.
+        this._packDecayAcc = 0;
+        this._packLanded = 0;
+        this._packDecayed = 0;
+        this._packCapped = 0;
+        this._packTruncated = 0;
+        this._packSkipped = 0;
+        this._packActive = 0;
+
         this._elapsedTime = 0;
         this._nFalling = 0;
         this._nMelting = 0;
@@ -156,6 +228,17 @@ export class SnowEngine {
             this._lastW = w;
             this._lastH = h;
             this._areaModifier = (w * h) / 100000;
+            // SN-08 pack policy: TRUNCATE, do not rescale (decisions/0003). One
+            // fill(0) on this already-cold hook; the zeroed volume is booked to
+            // _packTruncated so the exact integer identity survives the resize.
+            if (this._packOn && this._packActive !== 0) {
+                const pack = this.pack, cols = this._packCols;
+                let sum = 0;
+                for (let c = 0; c < cols; c++) sum += pack[c];
+                this._packTruncated += sum;
+                pack.fill(0);
+                this._packActive = 0;
+            }
         }
 
         const raw = Math.floor(this._areaModifier * this.config.density * (dt * 60));
@@ -252,6 +335,24 @@ export class SnowEngine {
         const dragOn = drag !== 1;
         const gustAccel = gustOn ? Math.sin(et * this.config.gustFreq) * gust : 0;
 
+        // Accumulation/friction knobs, hoisted ONCE (SN-14). All guarded by the
+        // construction-time _packOn / fricOn flags so an unarmed engine pays only
+        // branch bytes and its output stays byte-identical to v1.2.0. fy is the
+        // settle floor: floorY === null tracks the per-frame h (ONE comparison per
+        // frame, zero per flake -- decisions/0003 (c)).
+        const packOn = this._packOn;
+        const pack = this.pack;
+        const nCols = this._packCols;
+        const invPackRes = this._invPackRes;
+        const packRes = packOn ? this.config.packResolution : 0;
+        const maxPackHeight = packOn ? this.config.maxPackHeight : 0;
+        const packDecay = this.config.packDecay;
+        const floorCfg = this.config.floorY;
+        const fy = floorCfg === null ? h : floorCfg;
+        const friction = this.config.friction;
+        const fricOn = friction !== 0;
+        const fricMul = 1 - friction;
+
         const bin0 = this._bin0, bin1 = this._bin1, bin2 = this._bin2, binMelt = this._binMelt;
         const meltAlphaCount = this._meltAlphaCount;
         let n0 = 0, n1 = 0, n2 = 0, nMelt = 0;
@@ -308,16 +409,51 @@ export class SnowEngine {
                     continue;
                 }
 
-                if (y[i] >= h) {
-                    y[i] = h;
+                if (packOn) {
+                    // Settle onto the PACK surface: the threshold is fy minus the
+                    // column's current height. Out-of-domain columns (overhang,
+                    // wind past w) settle at fy and raise nothing -- fail closed by
+                    // SKIPPING, never clamping (decisions/0003 (d)). Math.floor,
+                    // not | 0: (-1, 0) must reject to -1, not fold into column 0.
+                    const c = Math.floor(x[i] * invPackRes);
+                    const inCol = c >= 0 && c < nCols;
+                    const thr = inCol ? fy - pack[c] : fy;
+                    if (y[i] >= thr) {
+                        y[i] = thr;
+                        state[i] = 2;
+                        this._nFalling--; this._nMelting++;
+                        life[i] = meltTimeMin + rng() * meltRange;
+                        if (fricOn) vx[i] *= fricMul; // contact-frame damp, vx only
+                        if (inCol) {
+                            const prev = pack[c];
+                            const raised = prev + PACK_GAIN;
+                            if (raised <= maxPackHeight) {
+                                if (prev === 0) this._packActive++;
+                                pack[c] = raised;
+                                this._packLanded++;
+                            } else {
+                                // Cap: the column is full. Book the clipped volume
+                                // so the identity stays exact; prev >= maxPackHeight
+                                // >= 1 here, so the column was already non-zero.
+                                pack[c] = maxPackHeight;
+                                this._packLanded++;
+                                this._packCapped += raised - maxPackHeight;
+                            }
+                        } else {
+                            this._packSkipped++;
+                        }
+                    }
+                } else if (y[i] >= fy) {
+                    y[i] = fy;
                     state[i] = 2;
                     this._nFalling--; this._nMelting++;
                     life[i] = meltTimeMin + rng() * meltRange;
+                    if (fricOn) vx[i] *= fricMul; // contact-frame damp, vx only
                 }
             } else { // s === 2
                 life[i] -= dt;
                 if (life[i] <= 0) { state[i] = 0; this._nMelting--; continue; }
-                if (y[i] > h) y[i] = h; // resize-shrink clamp, melt branch only (SN-08)
+                if (y[i] > fy) y[i] = fy; // resize-shrink clamp, melt branch only (SN-08)
             }
 
             // Push this live slot's FINAL state into its render bin.
@@ -334,8 +470,41 @@ export class SnowEngine {
             }
         }
 
+        // --- 1b. PACK DECAY (integer-stepped, over the FULL raise domain) ---
+        // Decay MUST cover exactly the columns the settle branch can raise, which
+        // is all nCols (culling admits x out to w+200, so landings reach columns
+        // past any visible-width bound). A narrower window would leave columns in
+        // [visible, nCols) WRITE-ONLY -- raised forever, never decayed, a permanent
+        // pile that stopping the snow never melts. nCols is a FIXED bound (1024 at
+        // defaults), independent of w (so resize-stable) and NEVER the particle
+        // count. Conservation stays exact but does NOT prove this: the ledger only
+        // counts what the loop decremented, so a too-small decay domain is
+        // invisible to the identity -- it is proven by packMeltsToZero instead
+        // (decisions/0003). The whole integer part of the accumulator drains in
+        // one pass (AD-1); each column loses its ACTUAL decrement (min(ticks,
+        // height)) so the identity survives any packDecay.
+        if (packOn) {
+            this._packDecayAcc += packDecay * dt;
+            const ticks = Math.floor(this._packDecayAcc);
+            if (ticks > 0) {
+                this._packDecayAcc -= ticks;
+                let decayed = 0;
+                for (let c = 0; c < nCols; c++) {
+                    const v = pack[c];
+                    if (v !== 0) {
+                        const d = v < ticks ? v : ticks;
+                        pack[c] = v - d;
+                        decayed += d;
+                        if (v === d) this._packActive--;
+                    }
+                }
+                this._packDecayed += decayed;
+            }
+        }
+
         // --- 2. BIN-DRIVEN RENDER PIPELINE ---
-        // Exactly 3 depth-bucket fills + one fill per populated melt band.
+        // Exactly 3 depth-bucket fills + one pack fill (when non-empty) + one fill
+        // per populated melt band.
         try {
             ctx.fillStyle = this.colorStr;
 
@@ -365,6 +534,29 @@ export class SnowEngine {
                 ctx.arc(x[i], y[i], radius[i], 0, TAU);
             }
             ctx.fill();
+
+            // Pack: ONE closed-path fill for the whole pile, drawn AFTER the three
+            // bucket fills and BEFORE the melt bands so melting flakes render over
+            // it (decisions/0003 (b)). A stepped top profile walked across the
+            // visible columns, closed along fy. Emitted only when the pack is
+            // non-empty, so an armed-but-empty engine still fills exactly 3 + melt
+            // bands -- the +1 is provably the pack, not a miscount.
+            if (packOn && this._packActive > 0) {
+                ctx.globalAlpha = PACK_ALPHA;
+                ctx.beginPath();
+                let vis = Math.ceil(w * invPackRes);
+                if (vis > nCols) vis = nCols;
+                ctx.moveTo(0, fy);
+                for (let c = 0; c < vis; c++) {
+                    const top = fy - pack[c];
+                    const x0 = c * packRes;
+                    ctx.lineTo(x0, top);
+                    ctx.lineTo(x0 + packRes, top);
+                }
+                ctx.lineTo(vis * packRes, fy);
+                ctx.closePath();
+                ctx.fill();
+            }
 
             // Melt: one beginPath/fill per populated alpha band (SN-06). Each
             // band re-reads the packed melt bin; the band lives in the top bits.
@@ -397,6 +589,17 @@ export class SnowEngine {
         this._nFalling = 0;
         this._nMelting = 0;
         this._spawnCursor = 0;
+        // Pack reset (guarded non-null): the heightmap AND every ledger scalar
+        // return to fresh-construction, so a next cycle's flakes never settle on a
+        // stale pile (decisions/0003).
+        if (this.pack !== null) this.pack.fill(0);
+        this._packDecayAcc = 0;
+        this._packLanded = 0;
+        this._packDecayed = 0;
+        this._packCapped = 0;
+        this._packTruncated = 0;
+        this._packSkipped = 0;
+        this._packActive = 0;
     }
 
     destroy() {
@@ -410,6 +613,7 @@ export class SnowEngine {
         this.vx = null; this.vy = null;
         this._bin0 = null; this._bin1 = null; this._bin2 = null;
         this._binMelt = null; this._meltAlphaCount = null;
+        this.pack = null;
         this.config = null; this.colorStr = null;
     }
 

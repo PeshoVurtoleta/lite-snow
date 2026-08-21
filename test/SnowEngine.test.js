@@ -16,6 +16,9 @@ import { SnowEngine, SNOW_PRESETS, VERSION } from '../SnowEngine.js';
 
 const ctx = {
     clearRect() {}, beginPath() {}, moveTo() {},
+    // lineTo/closePath: the S6 accumulation pack is one closed-path polygon
+    // fill; the mock must implement them or an armed render throws mid-frame.
+    lineTo() {}, closePath() {},
     arc() {}, ellipse() {}, fill() {},
     globalAlpha: 1, fillStyle: '',
 };
@@ -181,7 +184,7 @@ describe('boundary', () => {
     test('VERSION is exported and agrees with package.json (three-place sync)', () => {
         const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
         assert.equal(typeof VERSION, 'string');
-        assert.equal(VERSION, '1.2.0');
+        assert.equal(VERSION, '1.3.0');
         assert.equal(VERSION, pkg.version, 'VERSION const and package.json disagree');
     });
 
@@ -582,5 +585,160 @@ describe('S2 constructor, freeze, lifecycle, telemetry', () => {
                 assert.fail(`non-ASCII U+${cp.toString(16).toUpperCase()} at index ${i}`);
             }
         }
+    });
+});
+
+describe('S6 accumulation and friction config surface', () => {
+    test('accumulate defaults to false; pack stays null and out-of-range pack ' +
+        'knobs do NOT throw when unarmed', () => {
+        const e = new SnowEngine(100);
+        assert.equal(e.config.accumulate, false);
+        assert.equal(e.pack, null);
+        // packResolution/maxPackWidth/maxPackHeight are validated ONLY when
+        // accumulate === true (decisions/0003 (e)) -- values that would throw
+        // when armed must be silently inert when not.
+        assert.doesNotThrow(() => new SnowEngine(10, {
+            maxPackWidth: -1, packResolution: 0, maxPackHeight: 1e9,
+        }));
+    });
+
+    test('accumulate: true allocates a Uint16Array(nCols) heightmap once, ' +
+        'nCols = maxPackWidth/packResolution', () => {
+        const e = new SnowEngine(10, { accumulate: true, maxPackWidth: 800, packResolution: 4 });
+        assert.ok(e.pack instanceof Uint16Array, 'pack must be a Uint16Array when armed');
+        assert.equal(e.pack.length, 200);
+        assert.equal(e._packCols, 200);
+        // default sizing: 4096/4 = 1024 columns -> 2048 B
+        const d = new SnowEngine(10, { accumulate: true });
+        assert.equal(d.pack.length, 1024);
+        assert.equal(d.pack.buffer.byteLength, 2048);
+    });
+
+    test('accumulate arms strictly on === true -- truthy non-true values do not arm it', () => {
+        for (const v of ['yes', 1, {}, [], 'true', 'false']) {
+            const e = new SnowEngine(4, { accumulate: v });
+            assert.equal(e.pack, null, `accumulate=${String(v)} must NOT arm the pack`);
+        }
+    });
+
+    test('a runtime flip of config.accumulate after construction is inert, both directions', () => {
+        const off = new SnowEngine(10, { accumulate: false, gravity: 100000, density: 1000 });
+        off.config.accumulate = true;
+        off.spawn(0.1, 100, 100);
+        off.updateAndDraw(ctx, 0.1, 100, 100);
+        assert.equal(off.pack, null,
+            'flipping accumulate=true after construction must not allocate a pack');
+
+        const on = new SnowEngine(10, { accumulate: true, gravity: 100000, density: 1000 });
+        const packRef = on.pack;
+        on.config.accumulate = false;
+        on.spawn(0.1, 100, 100);
+        on.updateAndDraw(ctx, 0.1, 100, 100);
+        assert.equal(on.pack, packRef,
+            'flipping accumulate=false after construction must not null or reallocate the pack');
+    });
+
+    test('A13/AD-2: packResolution/maxPackWidth/maxPackHeight throw RangeError ' +
+        'naming the value, only when accumulate: true', () => {
+        const prBad = [0, -1, 2.5, NaN, 257];
+        for (const v of prBad) {
+            assert.throws(
+                () => new SnowEngine(10, { accumulate: true, packResolution: v }),
+                (err) => err instanceof RangeError && err.message.includes(String(v)),
+                `packResolution=${String(v)} must throw a RangeError naming the value`);
+        }
+        const pwBad = [0, -1, 2.5, NaN, Infinity, null, '4096', 32768];
+        for (const v of pwBad) {
+            assert.throws(
+                () => new SnowEngine(10, { accumulate: true, maxPackWidth: v }),
+                (err) => err instanceof RangeError && err.message.includes(String(v)),
+                `maxPackWidth=${String(v)} must throw a RangeError naming the value`);
+        }
+        const phBad = [0, -1, 2.5, NaN, Infinity, 65536, 1e9];
+        for (const v of phBad) {
+            assert.throws(
+                () => new SnowEngine(10, { accumulate: true, maxPackHeight: v }),
+                (err) => err instanceof RangeError && err.message.includes(String(v)),
+                `maxPackHeight=${String(v)} must throw a RangeError naming the value`);
+        }
+        assert.doesNotThrow(() => new SnowEngine(10, {
+            accumulate: true, packResolution: 4, maxPackWidth: 4096, maxPackHeight: 200,
+        }));
+        // boundary: the inclusive ends of each range construct cleanly.
+        assert.doesNotThrow(() => new SnowEngine(4, { accumulate: true, packResolution: 1 }));
+        assert.doesNotThrow(() => new SnowEngine(4, { accumulate: true, packResolution: 256 }));
+        assert.doesNotThrow(() => new SnowEngine(4, { accumulate: true, maxPackWidth: 16384, packResolution: 1 }));
+        assert.doesNotThrow(() => new SnowEngine(4, { accumulate: true, maxPackHeight: 1 }));
+        assert.doesNotThrow(() => new SnowEngine(4, { accumulate: true, maxPackHeight: 65535 }));
+    });
+
+    test('A14/AD-3: floorY/friction/packDecay poison matrix fails closed', () => {
+        const POISON = [NaN, Infinity, -Infinity, undefined, 'garbage', {}, []];
+        for (const v of POISON) {
+            const eFloor = new SnowEngine(4, { floorY: v });
+            assert.equal(eFloor.config.floorY, null, `floorY=${String(v)} must land on null`);
+
+            const eFric = new SnowEngine(4, { friction: v });
+            assert.equal(eFric.config.friction, 0, `friction=${String(v)} must land on default 0`);
+
+            const eDecay = new SnowEngine(4, { packDecay: v });
+            assert.equal(eDecay.config.packDecay, 2.0,
+                `packDecay=${String(v)} must land on default 2.0 (null is not "never decay")`);
+        }
+
+        // friction clamps to [0, 1]: negative -> 0 (never anti-friction, which
+        // would AMPLIFY vx), > 1 -> 1.
+        assert.equal(new SnowEngine(4, { friction: -1 }).config.friction, 0);
+        assert.equal(new SnowEngine(4, { friction: -0.001 }).config.friction, 0);
+        assert.equal(new SnowEngine(4, { friction: 5 }).config.friction, 1);
+        assert.equal(new SnowEngine(4, { friction: 1 }).config.friction, 1);
+        assert.equal(new SnowEngine(4, { friction: 0 }).config.friction, 0);
+        assert.equal(new SnowEngine(4, { friction: 0.8 }).config.friction, 0.8);
+
+        // packDecay: a NEGATIVE value coerces to 0 (no decay), never anti-decay
+        // (a pack that GROWS from nothing would corrupt the (a) identity).
+        assert.equal(new SnowEngine(4, { packDecay: -5 }).config.packDecay, 0);
+        assert.equal(new SnowEngine(4, { packDecay: 0 }).config.packDecay, 0);
+        assert.equal(new SnowEngine(4, { packDecay: 10 }).config.packDecay, 10);
+
+        // floorY: a finite value is used RAW, not clamped to [0, h] -- an
+        // overlay HUD bar is the stated use case.
+        assert.equal(new SnowEngine(4, { floorY: 400 }).config.floorY, 400);
+        assert.equal(new SnowEngine(4, { floorY: -50 }).config.floorY, -50);
+        assert.equal(new SnowEngine(4, { floorY: 0 }).config.floorY, 0);
+        assert.equal(new SnowEngine(4, { floorY: null }).config.floorY, null);
+    });
+
+    test('destroy() nulls the pack (S6)', () => {
+        const e = new SnowEngine(10, { accumulate: true });
+        assert.ok(e.pack !== null, 'setup: pack must be armed for this test to mean anything');
+        e.destroy();
+        assert.equal(e.pack, null, 'destroy() must null the pack');
+    });
+
+    test('clear() zeroes the pack and every ledger scalar (S6)', () => {
+        const e = new SnowEngine(4, {
+            accumulate: true, packResolution: 4, maxPackWidth: 16,
+            gravity: 100000, density: 1000, wind: 0,
+            meltTimeMin: 2.0, meltTimeMax: 5.0,
+        });
+        e.spawn(0.1, 16, 10);
+        e.updateAndDraw(ctx, 0.1, 16, 10);
+        let sum = 0;
+        for (let i = 0; i < e.pack.length; i++) sum += e.pack[i];
+        assert.ok(sum > 0, 'setup: the pack must be non-empty before clear() for this test to mean anything');
+        assert.ok(e._packLanded > 0, 'setup: _packLanded must be non-zero before clear()');
+
+        e.clear();
+        for (let i = 0; i < e.pack.length; i++) {
+            assert.equal(e.pack[i], 0, `clear() must zero pack[${i}]`);
+        }
+        assert.equal(e._packDecayAcc, 0);
+        assert.equal(e._packLanded, 0);
+        assert.equal(e._packDecayed, 0);
+        assert.equal(e._packCapped, 0);
+        assert.equal(e._packTruncated, 0);
+        assert.equal(e._packSkipped, 0);
+        assert.equal(e._packActive, 0);
     });
 });

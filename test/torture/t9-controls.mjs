@@ -23,7 +23,7 @@ import { SnowEngine } from '../../SnowEngine.js';
 import {
     SEED, makeRng, runOpsGate, conservation, occupancy, die, makeMockCtx,
     nanDtSurvived, spawnBoundHolds, clearIsFullReset, destroyReleasesAll,
-    countersAgree, spawnCapNoWrap,
+    countersAgree, spawnCapNoWrap, packConservation,
 } from './harness.mjs';
 import { SnowOracle, tuplesMatch } from './t5-fuzz.mjs';
 import { digestEngine, SOA_NAMES } from './armed-scenario.mjs';
@@ -467,6 +467,304 @@ class NoVelocityResetEngine extends SnowEngine {
             if (++spawned >= cap) break;
         }
         this._spawnCursor = cursor;
+    }
+}
+
+// ============================================================================
+// S6 accumulation/friction controls (A11, A12). Both are FROZEN verbatim
+// copies of updateAndDraw's PHYSICS + pack-domain/decay logic with exactly
+// ONE mutation each -- the render section is a trivial stub (these classes
+// are only walked via `pack`/the ledger scalars by packConservation/packSum,
+// never digested or rendered pixel-for-pixel, so a simplified render is not a
+// second, hidden mutation). Never update either to track the engine.
+// ============================================================================
+
+/**
+ * A11: the decay loop's `pack[c] = v - d;` decrement (and the paired
+ * `_packActive--` on drain) are REMOVED, while `_packDecayed` is STILL
+ * bumped by the same `decayed` total it would have been in the real engine --
+ * a decay counter that lies about what the array actually lost. This is
+ * EXACTLY the failure mode (a)'s identity exists to catch: `_packDecayed`
+ * over-counts what the array lost.
+ */
+class NoDecayEngine extends SnowEngine {
+    updateAndDraw(ctx, dt, w, h) {
+        if (this._destroyed) return;
+        if (!ctx || typeof ctx.ellipse !== 'function' || typeof ctx.arc !== 'function') return;
+        dt = this._sane(dt, w, h); if (dt < 0) return;
+        this._elapsedTime += dt;
+        const et = this._elapsedTime;
+        const meltTimeMin = this.config.meltTimeMin;
+        const meltRange = this.config.meltTimeMax - this.config.meltTimeMin;
+        const rng = this.config.rng;
+        const max = this.max;
+        const state = this.state, x = this.x, y = this.y;
+        const gz = this.gz, wz = this.wz;
+        const driftPhase = this.driftPhase, driftSpeed = this.driftSpeed;
+        const driftAmp = this.driftAmp, life = this.life;
+        const vx = this.vx, vy = this.vy;
+        const gust = this.config.gust, turbulence = this.config.turbulence, drag = this.config.drag;
+        const gustOn = gust !== 0, turbOn = turbulence !== 0, dragOn = drag !== 1;
+        const gustAccel = gustOn ? Math.sin(et * this.config.gustFreq) * gust : 0;
+        const ACCEL_MAX = 10000;
+
+        const packOn = this._packOn;
+        const pack = this.pack;
+        const nCols = this._packCols;
+        const invPackRes = this._invPackRes;
+        const maxPackHeight = packOn ? this.config.maxPackHeight : 0;
+        const packDecay = this.config.packDecay;
+        const floorCfg = this.config.floorY;
+        const fy = floorCfg === null ? h : floorCfg;
+        const friction = this.config.friction;
+        const fricOn = friction !== 0;
+        const fricMul = 1 - friction;
+
+        for (let i = 0; i < max; i++) {
+            const s = state[i];
+            if (s === 0) continue;
+            if (s === 1) {
+                const tp = et * driftSpeed[i] + driftPhase[i];
+                const sway = Math.sin(tp) * driftAmp[i];
+                if (dragOn) {
+                    let ax = wz[i] + sway;
+                    let ay = gz[i];
+                    if (gustOn) ax += gustAccel;
+                    if (turbOn) { ax += Math.cos(tp) * turbulence; ay += Math.sin(tp) * turbulence; }
+                    if (ax > ACCEL_MAX) ax = ACCEL_MAX; else if (ax < -ACCEL_MAX) ax = -ACCEL_MAX;
+                    if (ay > ACCEL_MAX) ay = ACCEL_MAX; else if (ay < -ACCEL_MAX) ay = -ACCEL_MAX;
+                    vx[i] = (vx[i] + ax * dt) * drag;
+                    vy[i] = (vy[i] + ay * dt) * drag;
+                    x[i] += vx[i] * dt;
+                    y[i] += vy[i] * dt;
+                } else {
+                    x[i] += (wz[i] + sway) * dt;
+                    y[i] += gz[i] * dt;
+                    if (gustOn || turbOn) {
+                        let ax = gustOn ? gustAccel : 0;
+                        let ay = 0;
+                        if (turbOn) { ax += Math.cos(tp) * turbulence; ay += Math.sin(tp) * turbulence; }
+                        if (ax > ACCEL_MAX) ax = ACCEL_MAX; else if (ax < -ACCEL_MAX) ax = -ACCEL_MAX;
+                        if (ay > ACCEL_MAX) ay = ACCEL_MAX; else if (ay < -ACCEL_MAX) ay = -ACCEL_MAX;
+                        vx[i] += ax * dt;
+                        vy[i] += ay * dt;
+                        x[i] += vx[i] * dt;
+                        y[i] += vy[i] * dt;
+                    }
+                }
+                if (!(x[i] >= -200 && x[i] <= w + 200 && y[i] >= -200)) {
+                    state[i] = 0; this._nFalling--; continue;
+                }
+                if (packOn) {
+                    const c = Math.floor(x[i] * invPackRes);
+                    const inCol = c >= 0 && c < nCols;
+                    const thr = inCol ? fy - pack[c] : fy;
+                    if (y[i] >= thr) {
+                        y[i] = thr;
+                        state[i] = 2;
+                        this._nFalling--; this._nMelting++;
+                        life[i] = meltTimeMin + rng() * meltRange;
+                        if (fricOn) vx[i] *= fricMul;
+                        if (inCol) {
+                            const prev = pack[c];
+                            const raised = prev + 1; // PACK_GAIN
+                            if (raised <= maxPackHeight) {
+                                if (prev === 0) this._packActive++;
+                                pack[c] = raised;
+                                this._packLanded++;
+                            } else {
+                                pack[c] = maxPackHeight;
+                                this._packLanded++;
+                                this._packCapped += raised - maxPackHeight;
+                            }
+                        } else {
+                            this._packSkipped++;
+                        }
+                    }
+                } else if (y[i] >= fy) {
+                    y[i] = fy; state[i] = 2;
+                    this._nFalling--; this._nMelting++;
+                    life[i] = meltTimeMin + rng() * meltRange;
+                    if (fricOn) vx[i] *= fricMul;
+                }
+            } else {
+                life[i] -= dt;
+                if (life[i] <= 0) { state[i] = 0; this._nMelting--; continue; }
+                if (y[i] > fy) y[i] = fy;
+            }
+        }
+
+        // MUTATED decay (A11): `decayed` is still summed and STILL added to
+        // _packDecayed, but `pack[c]` is never written and `_packActive` is
+        // never drained -- the decay loop's real work is gone, only its
+        // counter side-effect survives.
+        if (packOn) {
+            this._packDecayAcc += packDecay * dt;
+            const ticks = Math.floor(this._packDecayAcc);
+            if (ticks > 0) {
+                this._packDecayAcc -= ticks;
+                let decayed = 0;
+                for (let c = 0; c < nCols; c++) {
+                    const v = pack[c];
+                    if (v !== 0) {
+                        const d = v < ticks ? v : ticks;
+                        decayed += d; // pack[c] = v - d; -- REMOVED (MUTATED)
+                    }
+                }
+                this._packDecayed += decayed;
+            }
+        }
+
+        try {
+            ctx.fillStyle = this.colorStr;
+            ctx.globalAlpha = 1;
+            ctx.beginPath();
+            ctx.fill();
+        } finally {
+            ctx.globalAlpha = 1.0;
+        }
+    }
+}
+
+/**
+ * A12: the out-of-domain landing check no longer SKIPS -- it CLAMPS `c` into
+ * `[0, nCols-1]` and always raises a column (decisions/0003 (d) rejected
+ * behaviour). `_packSkipped` never increments. Decay is left INTACT (real),
+ * so only the domain guard is under test here.
+ */
+class ClampColumnEngine extends SnowEngine {
+    updateAndDraw(ctx, dt, w, h) {
+        if (this._destroyed) return;
+        if (!ctx || typeof ctx.ellipse !== 'function' || typeof ctx.arc !== 'function') return;
+        dt = this._sane(dt, w, h); if (dt < 0) return;
+        this._elapsedTime += dt;
+        const et = this._elapsedTime;
+        const meltTimeMin = this.config.meltTimeMin;
+        const meltRange = this.config.meltTimeMax - this.config.meltTimeMin;
+        const rng = this.config.rng;
+        const max = this.max;
+        const state = this.state, x = this.x, y = this.y;
+        const gz = this.gz, wz = this.wz;
+        const driftPhase = this.driftPhase, driftSpeed = this.driftSpeed;
+        const driftAmp = this.driftAmp, life = this.life;
+        const vx = this.vx, vy = this.vy;
+        const gust = this.config.gust, turbulence = this.config.turbulence, drag = this.config.drag;
+        const gustOn = gust !== 0, turbOn = turbulence !== 0, dragOn = drag !== 1;
+        const gustAccel = gustOn ? Math.sin(et * this.config.gustFreq) * gust : 0;
+        const ACCEL_MAX = 10000;
+
+        const packOn = this._packOn;
+        const pack = this.pack;
+        const nCols = this._packCols;
+        const invPackRes = this._invPackRes;
+        const maxPackHeight = packOn ? this.config.maxPackHeight : 0;
+        const packDecay = this.config.packDecay;
+        const floorCfg = this.config.floorY;
+        const fy = floorCfg === null ? h : floorCfg;
+        const friction = this.config.friction;
+        const fricOn = friction !== 0;
+        const fricMul = 1 - friction;
+
+        for (let i = 0; i < max; i++) {
+            const s = state[i];
+            if (s === 0) continue;
+            if (s === 1) {
+                const tp = et * driftSpeed[i] + driftPhase[i];
+                const sway = Math.sin(tp) * driftAmp[i];
+                if (dragOn) {
+                    let ax = wz[i] + sway;
+                    let ay = gz[i];
+                    if (gustOn) ax += gustAccel;
+                    if (turbOn) { ax += Math.cos(tp) * turbulence; ay += Math.sin(tp) * turbulence; }
+                    if (ax > ACCEL_MAX) ax = ACCEL_MAX; else if (ax < -ACCEL_MAX) ax = -ACCEL_MAX;
+                    if (ay > ACCEL_MAX) ay = ACCEL_MAX; else if (ay < -ACCEL_MAX) ay = -ACCEL_MAX;
+                    vx[i] = (vx[i] + ax * dt) * drag;
+                    vy[i] = (vy[i] + ay * dt) * drag;
+                    x[i] += vx[i] * dt;
+                    y[i] += vy[i] * dt;
+                } else {
+                    x[i] += (wz[i] + sway) * dt;
+                    y[i] += gz[i] * dt;
+                    if (gustOn || turbOn) {
+                        let ax = gustOn ? gustAccel : 0;
+                        let ay = 0;
+                        if (turbOn) { ax += Math.cos(tp) * turbulence; ay += Math.sin(tp) * turbulence; }
+                        if (ax > ACCEL_MAX) ax = ACCEL_MAX; else if (ax < -ACCEL_MAX) ax = -ACCEL_MAX;
+                        if (ay > ACCEL_MAX) ay = ACCEL_MAX; else if (ay < -ACCEL_MAX) ay = -ACCEL_MAX;
+                        vx[i] += ax * dt;
+                        vy[i] += ay * dt;
+                        x[i] += vx[i] * dt;
+                        y[i] += vy[i] * dt;
+                    }
+                }
+                if (!(x[i] >= -200 && x[i] <= w + 200 && y[i] >= -200)) {
+                    state[i] = 0; this._nFalling--; continue;
+                }
+                if (packOn) {
+                    const cRaw = Math.floor(x[i] * invPackRes);
+                    // MUTATED: clamp into [0, nCols-1] instead of skipping.
+                    const c = cRaw < 0 ? 0 : (cRaw >= nCols ? nCols - 1 : cRaw);
+                    const thr = fy - pack[c];
+                    if (y[i] >= thr) {
+                        y[i] = thr;
+                        state[i] = 2;
+                        this._nFalling--; this._nMelting++;
+                        life[i] = meltTimeMin + rng() * meltRange;
+                        if (fricOn) vx[i] *= fricMul;
+                        const prev = pack[c];
+                        const raised = prev + 1; // PACK_GAIN
+                        if (raised <= maxPackHeight) {
+                            if (prev === 0) this._packActive++;
+                            pack[c] = raised;
+                            this._packLanded++;
+                        } else {
+                            pack[c] = maxPackHeight;
+                            this._packLanded++;
+                            this._packCapped += raised - maxPackHeight;
+                        }
+                        // this._packSkipped++ -- REMOVED (MUTATED): never skips
+                    }
+                } else if (y[i] >= fy) {
+                    y[i] = fy; state[i] = 2;
+                    this._nFalling--; this._nMelting++;
+                    life[i] = meltTimeMin + rng() * meltRange;
+                    if (fricOn) vx[i] *= fricMul;
+                }
+            } else {
+                life[i] -= dt;
+                if (life[i] <= 0) { state[i] = 0; this._nMelting--; continue; }
+                if (y[i] > fy) y[i] = fy;
+            }
+        }
+
+        // Decay is REAL/unmutated here -- only the domain guard is under test.
+        if (packOn) {
+            this._packDecayAcc += packDecay * dt;
+            const ticks = Math.floor(this._packDecayAcc);
+            if (ticks > 0) {
+                this._packDecayAcc -= ticks;
+                let decayed = 0;
+                for (let c = 0; c < nCols; c++) {
+                    const v = pack[c];
+                    if (v !== 0) {
+                        const d = v < ticks ? v : ticks;
+                        pack[c] = v - d;
+                        decayed += d;
+                        if (v === d) this._packActive--;
+                    }
+                }
+                this._packDecayed += decayed;
+            }
+        }
+
+        try {
+            ctx.fillStyle = this.colorStr;
+            ctx.globalAlpha = 1;
+            ctx.beginPath();
+            ctx.fill();
+        } finally {
+            ctx.globalAlpha = 1.0;
+        }
     }
 }
 
@@ -930,6 +1228,82 @@ export function run() {
         if (leaked === 0) {
             die('T9 control vx/vy reset: removing the vx[i]=0/vy[i]=0 reset did NOT leak a ' +
                 'nonzero velocity into any recycled slot -- the load-bearing claim cannot fail');
+        }
+    }
+
+    // Control -- A11 (S6): the pack conservation checker's NO-DECAY control.
+    // NoDecayEngine bumps _packDecayed by exactly what a real decay pass would
+    // have removed, but never actually removes it from `pack` -- so
+    // packConservation() MUST report false for it. The FIXED engine, driven
+    // through the identical scenario, must report true. Both directions
+    // asserted (S5-carry-forward: a same-array-walk checker could never do
+    // this, per decisions/0003 and the harness's packConservation doc).
+    {
+        const cfg = () => ({
+            accumulate: true, packResolution: 4, maxPackWidth: 80, maxPackHeight: 50,
+            packDecay: 20, gravity: 4000, wind: 0, density: 200,
+            meltTimeMin: 2.0, meltTimeMax: 3.0, rng: makeRng(SEED ^ 0x11ac0011),
+        });
+        const fixed = new SnowEngine(200, cfg());
+        const mutant = new NoDecayEngine(200, cfg());
+        const ctxF = makeMockCtx(), ctxM = makeMockCtx();
+        for (let f = 0; f < 300; f++) {
+            fixed.spawn(0.05, 80, 40); fixed.updateAndDraw(ctxF, 0.05, 80, 40);
+            mutant.spawn(0.05, 80, 40); mutant.updateAndDraw(ctxM, 0.05, 80, 40);
+        }
+        if (fixed._packDecayed === 0) {
+            die('T9 control A11: the fixed engine never decayed anything over 300 frames -- ' +
+                'control setup broken (this control would prove nothing)');
+        }
+        const fixedResult = packConservation(fixed);
+        const mutantResult = packConservation(mutant);
+        process.stderr.write('torture: note -- T9 control A11 (no-decay): fixed.ok=' + fixedResult.ok +
+            ' (lhs=' + fixedResult.lhs + ' rhs=' + fixedResult.rhs + '), mutant.ok=' + mutantResult.ok +
+            ' (lhs=' + mutantResult.lhs + ' rhs=' + mutantResult.rhs + ')\n');
+        if (!fixedResult.ok) {
+            die('T9 control A11: the FIXED engine failed packConservation (lhs=' + fixedResult.lhs +
+                ' rhs=' + fixedResult.rhs + ') -- the conservation gate passes for the wrong reason');
+        }
+        if (mutantResult.ok) {
+            die('T9 control A11: the no-decay mutant PASSED packConservation (lhs=' + mutantResult.lhs +
+                ' rhs=' + mutantResult.rhs + ') -- the conservation gate cannot fail');
+        }
+    }
+
+    // Control -- A12 (S6): the column-domain guard. ClampColumnEngine clamps
+    // every landing into [0, nCols-1] instead of skipping out-of-domain ones,
+    // so on a high-wind, narrow-pack scenario its edge column must exceed the
+    // fixed engine's measurably. The fixed engine's _packSkipped must be > 0
+    // on that SAME scenario -- proving the domain filter actually fires on a
+    // normal frame, not the "S5 shipped two dead checks" failure mode
+    // (decisions/0003 (d)).
+    {
+        const cfg = () => ({
+            accumulate: true, packResolution: 4, maxPackWidth: 400, maxPackHeight: 2000,
+            packDecay: 0, gravity: 300, wind: 900, density: 300,
+            meltTimeMin: 3.0, meltTimeMax: 4.0, rng: makeRng(SEED ^ 0x0ac1a012),
+        });
+        const W = 1600, H = 500, DT = 1 / 60;
+        const fixed = new SnowEngine(2000, cfg());
+        const mutant = new ClampColumnEngine(2000, cfg());
+        const ctxF = makeMockCtx(), ctxM = makeMockCtx();
+        for (let f = 0; f < 600; f++) {
+            fixed.spawn(DT, W, H); fixed.updateAndDraw(ctxF, DT, W, H);
+            mutant.spawn(DT, W, H); mutant.updateAndDraw(ctxM, DT, W, H);
+        }
+        if (fixed._packSkipped === 0) {
+            die('T9 control A12: _packSkipped stayed 0 on the fixed engine over 600 frames of ' +
+                'wind=900 on a 400px-wide pack under a 1600px canvas -- the domain guard never ' +
+                'fires, the S5 "dead check" failure mode (control setup broken)');
+        }
+        const nCols = fixed._packCols; // maxPackWidth/packResolution = 100
+        const edge = nCols - 1;
+        process.stderr.write('torture: note -- T9 control A12: fixed pack[edge]=' + fixed.pack[edge] +
+            ' mutant pack[edge]=' + mutant.pack[edge] + ' fixed._packSkipped=' + fixed._packSkipped + '\n');
+        if (!(mutant.pack[edge] > fixed.pack[edge])) {
+            die('T9 control A12: the clamp mutant edge column (' + mutant.pack[edge] +
+                ') did not measurably exceed the fixed engine\'s (' + fixed.pack[edge] +
+                ') -- the domain-skip assertion cannot fail');
         }
     }
 }

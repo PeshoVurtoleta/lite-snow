@@ -55,12 +55,13 @@ function fillTo(engine, frac) {
     }
 }
 
-function gateLane(frac, label) {
+function gateLane(frac, label, extraConfig) {
     const engine = new SnowEngine(MAX, {
         gravity: 400, wind: 60, density: 40,
         driftAmplitude: 15, driftFreq: 1.0,
         meltTimeMin: 0.5, meltTimeMax: 1.0,
         rng: makeRng(SEED),
+        ...extraConfig,
     });
     const ctx = makeMockCtx();
     fillTo(engine, frac);
@@ -75,6 +76,13 @@ function gateLane(frac, label) {
     for (let n = 0; n < BIN_NAMES.length; n++) {
         binBytesBefore[n] = engine[BIN_NAMES[n]].buffer.byteLength;
     }
+    // S6: the accumulation pack is a SEPARATE fixed-cost backing store, not
+    // one of the fourteen SoA columns (decisions/0003) -- guard non-null
+    // (armed only when `accumulate: true`) before reading its byteLength, per
+    // the reviewer's binding correction: an unguarded read throws on every
+    // unarmed lane, which would make this pin unconditionally red for the
+    // wrong reason.
+    const packBytesBefore = engine.pack !== null ? engine.pack.buffer.byteLength : null;
 
     // Everything the hot body touches is already allocated. The engine allocates
     // nothing per frame; the mock ctx allocates nothing per call.
@@ -97,6 +105,15 @@ function gateLane(frac, label) {
         check(engine[name].buffer.byteLength === binBytesBefore[n],
             () => `T6[${label}]: ${name} backing store grew ${binBytesBefore[n]} -> ${engine[name].buffer.byteLength}`);
     }
+    // S6 pin: guard engine.pack !== null first (unarmed lanes must see it stay
+    // null, never re-check a byteLength that does not exist on a null pack).
+    if (engine.pack !== null) {
+        check(engine.pack.buffer.byteLength === packBytesBefore,
+            () => `T6[${label}]: pack backing store grew ${packBytesBefore} -> ${engine.pack.buffer.byteLength}`);
+    } else {
+        check(packBytesBefore === null,
+            () => `T6[${label}]: pack was non-null before the window but null after (control setup broken)`);
+    }
 
     if (!report.ok) {
         const gc = summary.gc;
@@ -114,4 +131,8 @@ export function run() {
     gateLane(0.20, '20%');
     gateLane(0.60, '60%');
     gateLane(0.95, '95%');
+    // S6: an ARMED lane so the pack.buffer.byteLength pin's non-null branch is
+    // actually exercised -- the three lanes above only ever see pack === null,
+    // which would leave "the pack never reallocates" untested decoration.
+    gateLane(0.95, '95%-accumulate', { accumulate: true, friction: 0.5 });
 }

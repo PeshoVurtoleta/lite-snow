@@ -46,6 +46,52 @@ export interface SnowConfig {
      * non-finite value (incl. null) fails closed to the default. Default: 1
      */
     drag?: number;
+    /**
+     * Persistent-pack accumulation (S6). true builds a Uint16 heightmap that
+     * flakes land ON and that decays over time; false (the default) is
+     * byte-identical to v1.2.0 and leaves `pack === null`. CONSTRUCTION-TIME ONLY:
+     * arms strictly on `=== true`, and a runtime flip of this field is inert (no
+     * allocation, no behaviour change). Default: false
+     */
+    accumulate?: boolean;
+    /**
+     * Pack column width in px (one heightmap cell per this many px). When armed,
+     * must be an integer in [1, 256] or the constructor throws RangeError.
+     * Default: 4
+     */
+    packResolution?: number;
+    /**
+     * Max px the pack spans. `nCols = floor(maxPackWidth / packResolution)` cells
+     * are allocated once. A canvas wider than this accumulates only across the
+     * first maxPackWidth px (degrades visibly, never reallocates). When armed,
+     * must be an integer in [packResolution, 16384] or the constructor throws.
+     * Default: 4096
+     */
+    maxPackWidth?: number;
+    /**
+     * Max height (in packUnits) any single column may reach; landings past it are
+     * capped and booked. When armed, must be an integer in [1, 65535] or the
+     * constructor throws RangeError. Default: 200
+     */
+    maxPackHeight?: number;
+    /**
+     * Pack decay rate in packUnits/second (integer-stepped). A non-finite value
+     * (incl. null) fails closed to the default; a negative value coerces to 0 (no
+     * decay -- never anti-decay). Default: 2.0
+     */
+    packDecay?: number;
+    /**
+     * Settle floor in px. `null` (the default) tracks the per-frame canvas height
+     * `h`. A finite value is used RAW (not clamped to h) -- e.g. an overlay HUD
+     * bar. Any non-finite value fails closed to `null`. Default: null
+     */
+    floorY?: number | null;
+    /**
+     * Contact-frame horizontal damping applied ONCE at the settle transition:
+     * `vx *= 1 - friction`. Clamped to [0, 1]; a negative value coerces to 0
+     * (never anti-friction) and a non-finite value fails closed to 0. Default: 0
+     */
+    friction?: number;
     /** Snow color as OKLCH object { l, c, h } or CSS string. Default: 'oklch(0.98 0.02 250)' */
     color?: { l: number; c: number; h: number } | string;
     /** Random number generator () => number [0, 1). Default: Math.random */
@@ -80,6 +126,13 @@ export declare class SnowEngine {
     vx: Float32Array | null;
     /** Living-air perturbation velocity Y (S5). Zero unless gust/turbulence/drag is armed. */
     vy: Float32Array | null;
+    /**
+     * Accumulation heightmap (S6): a Uint16Array of `maxPackWidth/packResolution`
+     * columns, each an integer packUnit count. `null` unless `accumulate: true`.
+     * Allocated once, never reallocated (resize truncates in place), nulled by
+     * destroy().
+     */
+    pack: Uint16Array | null;
 
     /** Simulation clock in seconds, advanced by updateAndDraw(). @internal */
     _elapsedTime: number;
@@ -134,6 +187,8 @@ export declare class SnowEngine {
      * documented no-op frame: the clock does not advance and no state is touched.
      * A null ctx, or one without arc()/ellipse(), is likewise a no-op frame. A
      * draw call that throws mid-render restores globalAlpha to 1.0 and RETHROWS.
+     * When `accumulate: true`, emits ONE extra closed-path fill for the pack
+     * (only when the pack is non-empty), drawn under the melt ellipses.
      */
     updateAndDraw(ctx: CanvasRenderingContext2D, dt: number, w: number, h: number): void;
 
@@ -144,9 +199,9 @@ export declare class SnowEngine {
     clear(): void;
 
     /**
-     * Release all typed arrays -- the fourteen SoA columns and the five render
-     * bins -- and the config and colorStr references. Runs clear() first, so the
-     * clock and counters are zeroed. Idempotent.
+     * Release all typed arrays -- the fourteen SoA columns, the five render bins
+     * and the accumulation pack -- and the config and colorStr references. Runs
+     * clear() first, so the clock and counters are zeroed. Idempotent.
      */
     destroy(): void;
 }

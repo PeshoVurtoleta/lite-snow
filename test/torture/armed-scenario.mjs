@@ -28,7 +28,7 @@
 
 import { createHash } from 'node:crypto';
 import { SnowEngine } from '../../SnowEngine.js';
-import { makeRng, makeMockCtx, SOA_NAMES, SOA_NAMES_V111 } from './harness.mjs';
+import { makeRng, makeMockCtx, CtxSeqRecorder, SOA_NAMES, SOA_NAMES_V111 } from './harness.mjs';
 
 /** The frozen v1.1.1 back-compat reproduction. Plain defaults, no knob set. */
 export const BASELINE = Object.freeze({
@@ -44,6 +44,22 @@ export const BASELINE = Object.freeze({
  * activeCount split. Roadmap section: "ALREADY TRUE, do not redo". */
 export const BASELINE_DIGEST = 'f2e3ccef33428a982c91c15708c616e2a5df641840529dc112c6146f1d89ef15';
 export const BASELINE_COUNTS = Object.freeze({ active: 1998, falling: 1879, melting: 119 });
+
+/**
+ * Committed ORDERED ctx-call-sequence digest for the BASELINE scenario on the
+ * DEFAULT (unarmed) path, over the CtxSeqRecorder encoding (opcode byte + f64
+ * argument bits, rolling sha256). Captured on the untouched v1.2.0 tree BEFORE
+ * any accumulation code existed; S6's headline assertion (A1) is that the
+ * accumulate:false path still reproduces it exactly -- proving the pack changes
+ * are byte-identical on the default path, order and arguments and not just totals
+ * (a counter digest cannot see a reordering that preserves sums). Proven
+ * discriminating: a gust:40 run yields a different hex. The companion counts are
+ * pinned too so a digest match is never the only proof.
+ */
+export const CTX_SEQ_DIGEST_DEFAULT = '0886e3df880798c311b6da58a4df8f1ee0bcd1b850190570809662e24ff2ca2d';
+export const CTX_SEQ_COUNTS_DEFAULT = Object.freeze({
+    arcs: 5718630, ellipses: 247890, fills: 20426, beginPaths: 20426,
+});
 
 /** The armed-configuration scenario. Higher gravity than BASELINE so every
  * config -- including drag, which slows the fall -- populates BOTH falling and

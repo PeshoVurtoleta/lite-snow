@@ -1,6 +1,6 @@
 # @zakkster/lite-snow
 
-> Zero-GC SoA environmental snow engine. Drift physics, living-air forces (gust, turbulence, drag), Z-depth parallax, ellipse accumulation, bucketed rendering. Zero dependencies.
+> Zero-GC SoA environmental snow engine. Drift physics, living-air forces (gust, turbulence, drag), persistent-pack accumulation, friction, Z-depth parallax, bucketed rendering. Zero dependencies.
 
 ## Install
 npm i @zakkster/lite-snow
@@ -15,11 +15,12 @@ import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 - 14 SoA arrays: x, y, z, gz, wz, bucket, radius, driftPhase, driftSpeed, driftAmp, life, state, vx, vy
 - Precomputed per-flake: gz[]=gravity*z, wz[]=wind*z, radius[]=base*z, driftAmp[]=amp*z, bucket[]
 - Living air (S5): gust (global sinusoidal horizontal accel, phase on the _elapsedTime clock), turbulence (per-flake rotating accel reusing driftPhase/driftSpeed, zero new rng), drag (terminal-velocity damping). All OFF by default; default output is byte-identical to v1.1.1. vx[]/vy[] carry the perturbation; drag !== 1 is a separate integration model (decisions/0002)
-- Two-phase lifecycle: flake(state=1) drifts down -> settles -> melt(state=2) as flat ellipse
+- Two-phase lifecycle: flake(state=1) drifts down -> settles (state=2) -> melts as a flat ellipse; when accumulate:true it also raises a persistent pack column at the settle transition
+- Accumulation (S6, opt-in): accumulate:true builds a persistent Uint16 heightmap (pack) that flakes land ON and that decays over time. Off by default; when off pack===null and output is byte-identical to v1.2.0. Construction-time only: a runtime flip of config.accumulate is inert. An EXACT integer ledger: packSum === landed - decayed - capped - truncated. Out-of-range columns (overhang/wind) settle at floorY and raise nothing (skip, never clamp). maxPackHeight caps a column; over-width degrades visibly (no realloc); resize TRUNCATES the pack (drift lost, booked exactly). floorY (default null=track h) sets the settle floor; friction (default 0) damps vx once on the contact frame
 - Sinusoidal drift: per-flake random phase + speed + depth-scaled amplitude
 - Z-depth parallax (0.2-1.0): all physics/render params scale by depth
 - Bin-driven render: the physics pass bins every live flake into 4 preallocated Uint32 index lists (3 depth buckets + melt) in one sweep; render iterates only live slots. One full-pool scan per frame, down from 5
-- 3 depth-bucket fills + one fill per populated melt band = 3 + up to 8 draw calls per frame, independent of on-screen flake count
+- 3 depth-bucket fills + (1 pack fill when accumulate:true and the pack is non-empty) + one fill per populated melt band = 3 + [0..1] + up to 8 draw calls per frame, independent of on-screen flake count
 - Melt phase: ellipse (2.5× wider, 0.5× tall) with life-ratio alpha fade
 - Dimension cache: _areaModifier recomputed only on canvas size change
 - Off-screen culling: X +/- 200px and Y < -200 (wind + negative gravity leak)
@@ -31,9 +32,10 @@ import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 - RNG injectable, no lite-random dep
 - Ring-cursor spawn (SN-12): persistent _spawnCursor wraps; a full wrap with no free slot fails closed (stops, never spins); clear() resets it
 - Melt alpha quantized into <= 8 bands so N melters batch into <= 8 fills (SN-06); melt y clamped to h on resize-shrink (SN-08)
-- destroy() nulls the 14 SoA arrays and the 4 render-bin lists AND releases config, colorStr; runs clear() first
+- destroy() nulls the 14 SoA arrays, the 4 render-bin lists and the accumulation pack (when armed) AND releases config, colorStr; runs clear() first
 - Fail-closed door: non-finite or negative dt, or w/h <= 0, is a no-op frame (no clock advance, no state touch)
 - 66 bytes/particle: 50 SoA (12 Float32 x,y,z,gz,wz,radius,driftPhase,driftSpeed,driftAmp,life,vx,vy + 2 Uint8 bucket,state) + 16 for 4 Uint32 render-bin lists, allocated once, rebuilt in place each frame. vx/vy add +8 B/particle over v1.1.1 (+80 KB at max 10000)
+- Accumulation pack is a SEPARATE fixed cost, NOT per-particle: one Uint16Array(maxPackWidth/packResolution) columns, allocated once and only when accumulate:true (default 4096/4 = 1024 cols = 2 KB), never reallocated. Unarmed: pack===null, zero cost
 - maxParticles ceiling MAX_PARTICLES = 10000000; a non-integer or out-of-range max throws RangeError before allocation
 - baseRadius must be a finite number > 0 or the constructor throws RangeError; radius[] clamped to MIN_RADIUS (0.01)
 - clear() is a full reset: pool, clock, dimension cache and telemetry counters
@@ -42,7 +44,7 @@ import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 - SNOW_PRESETS and each of .flurry/.heavy/.blizzard are Object.frozen
 
 ## API
-- VERSION: '1.2.0'
+- VERSION: '1.3.0'
 - new SnowEngine(maxParticles?, config?)
 - .spawn(dt, w, h) -- spawn new flakes
 - .updateAndDraw(ctx, dt, w, h) -- physics + render
@@ -54,9 +56,12 @@ import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 gravity (40), wind (30), density (10), baseRadius (2.5), driftAmplitude (15),
 driftFreq (1.0), meltTimeMin (2.0), meltTimeMax (5.0),
 gust (0), gustFreq (TAU/3), turbulence (0), drag (1 = off),
+accumulate (false), packResolution (4), maxPackWidth (4096), maxPackHeight (200),
+packDecay (2.0 units/s), floorY (null = track h), friction (0),
 color ('oklch(0.98 0.02 250)'), rng (Math.random)
 Each living-air knob fails closed: a non-finite value (incl. null) lands on its default, not on 0.
 gustFreq 0 with gust armed is a stated no-op: sin(0)*gust freezes the gust off (0 Hz = no oscillation).
+accumulate is construction-time only (strict === true arms it); a runtime flip is inert. When armed, packResolution [1..256], maxPackWidth [packResolution..16384] and maxPackHeight [1..65535] must be integers or the constructor throws RangeError naming the value. floorY: non-finite -> null. friction: clamped [0,1], negative -> 0. packDecay: non-finite -> default 2.0, negative -> 0.
 
 ## Presets
 SNOW_PRESETS.flurry -- gentle
