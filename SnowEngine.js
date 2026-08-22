@@ -1,10 +1,10 @@
 /**
- * @zakkster/lite-snow v1.3.0
+ * @zakkster/lite-snow v1.4.0
  * Zero-GC, SoA Environmental Snow Engine
- * Drift physics, Z-depth parallax, persistent-pack accumulation, bin-driven rendering, 3 presets.
+ * Drift physics, Z-depth parallax, persistent-pack accumulation, bin-driven rendering, 4 presets, reduced-motion + spawn shaping.
  */
 
-export const VERSION = '1.3.0';
+export const VERSION = '1.4.0';
 
 const TAU = Math.PI * 2;
 const DT_MAX = 0.1;
@@ -48,6 +48,41 @@ const PACK_HEIGHT_MAX = 65535;    // maxPackHeight ceiling = Uint16 max (AD-2)
 const PACK_DECAY_DEF = 2.0;       // default decay rate (packUnits/s)
 const PACK_ALPHA = 0.9;           // the single pack fill's globalAlpha
 
+// The calm scene (S7). SINGLE SOURCE OF TRUTH for both SNOW_PRESETS.calm and the
+// reducedMotion hard override (decisions/0004 (d) mechanic 5): the preset is
+// Object.freeze({ ...CALM }) and the override reads its twelve MOTION keys from
+// CALM, so the two can never drift. Every non-MOTION key here is a constructor
+// default named with the SAME constant the default uses -- a preset is a COMPLETE
+// 21-key scene (decisions/0004 (e)), and completeness is what makes { ...calm,
+// ...heavy } equal heavy exactly. The seven non-default MOTION values
+// (density/wind/gravity/driftAmplitude, plus baseRadius/gust/turbulence at their
+// defaults) produce the measured meanDX 0.0795 / meanDY 0.1988 (decisions/0004
+// (e')). spawnBand is the null SENTINEL, never a nested object (decisions/0004
+// (f)).
+const CALM = Object.freeze({
+    gravity: 20,
+    wind: 8,
+    density: 4,
+    baseRadius: 2.5,
+    driftAmplitude: 4,
+    driftFreq: 1.0,
+    meltTimeMin: 2.0,
+    meltTimeMax: 5.0,
+    gust: 0,
+    gustFreq: GUST_FREQ_DEF,
+    turbulence: 0,
+    drag: 1,
+    spawnBand: null,
+    spawnMargin: null,
+    accumulate: false,
+    packResolution: 4,
+    maxPackWidth: 4096,
+    maxPackHeight: 200,
+    packDecay: PACK_DECAY_DEF,
+    floorY: null,
+    friction: 0
+});
+
 export class SnowEngine {
     constructor(maxParticles = 10000, config = {}) {
         if (!Number.isInteger(maxParticles) || maxParticles < 1 || maxParticles > MAX_PARTICLES) {
@@ -74,10 +109,43 @@ export class SnowEngine {
             packDecay: PACK_DECAY_DEF,
             floorY: null,
             friction: 0,
+            spawnBand: null,
+            spawnMargin: null,
+            reducedMotion: false,
             color: 'oklch(0.98 0.02 250)',
             rng: Math.random,
             ...config
         };
+
+        // reducedMotion is a HARD OVERRIDE resolved ONCE here (decisions/0004
+        // (d)): the accessibility flag WINS -- an explicit motion knob set
+        // alongside it is discarded, there is no "reduced blizzard". Strict arm
+        // (=== true, like accumulate): 'yes'/1/{} do not arm it. It resolves
+        // BEFORE baseRadius validation and every fail-closed coercion below
+        // BECAUSE under the flag the twelve MOTION keys are not user-supplied at
+        // all -- validating a value the engine will never read would throw on
+        // discarded input, so { baseRadius: 0, reducedMotion: true } constructs
+        // while { baseRadius: 0 } throws (the deliberate asymmetry, decisions/0004
+        // (d')). Twelve EXPLICIT assignments from the frozen CALM const, never
+        // Object.assign(this.config, CALM) -- that would mutate the caller's
+        // object and defeat the two-engine non-mutation contract. NEVER read
+        // again: no frame loop references _reducedMotion, so a mid-run flip is
+        // inert (like accumulate).
+        this._reducedMotion = this.config.reducedMotion === true;
+        if (this._reducedMotion) {
+            this.config.gravity = CALM.gravity;
+            this.config.wind = CALM.wind;
+            this.config.density = CALM.density;
+            this.config.baseRadius = CALM.baseRadius;
+            this.config.driftAmplitude = CALM.driftAmplitude;
+            this.config.driftFreq = CALM.driftFreq;
+            this.config.gust = CALM.gust;
+            this.config.gustFreq = CALM.gustFreq;
+            this.config.turbulence = CALM.turbulence;
+            this.config.drag = CALM.drag;
+            this.config.spawnBand = CALM.spawnBand;
+            this.config.spawnMargin = CALM.spawnMargin;
+        }
 
         if (!Number.isFinite(this.config.baseRadius) || this.config.baseRadius <= 0) {
             throw new RangeError('lite-snow: baseRadius must be a finite number > 0, got ' + String(this.config.baseRadius));
@@ -122,6 +190,33 @@ export class SnowEngine {
         cfg.floorY = Number.isFinite(cfg.floorY) ? cfg.floorY : null;
         cfg.friction = Number.isFinite(cfg.friction) ? (cfg.friction < 0 ? 0 : cfg.friction > 1 ? 1 : cfg.friction) : 0;
         cfg.packDecay = Number.isFinite(cfg.packDecay) ? (cfg.packDecay < 0 ? 0 : cfg.packDecay) : PACK_DECAY_DEF;
+
+        // spawnBand -> two plain-number locals for the SUBTRACTIVE spawn form
+        // `y = spawnY0 - rng()*spawnYSpan` (decisions/0004 (c)). DO NOT
+        // "simplify" to the mirror `min + rng()*(max-min)`: it is a DIFFERENT
+        // per-draw value for the same rng and breaks every committed digest while
+        // the snow still looks right. null (default), non-object, non-finite
+        // bound or max < min all FAIL CLOSED to the literal -50/50 constants
+        // (byte-identical to v1.3.0 by construction); a negative span would flip
+        // the sign of the rng term, so an unverified band is not a band. A
+        // coerce, not a throw: it sizes no allocation (decisions/0004 (g)).
+        const sb = cfg.spawnBand;
+        if (sb !== null && typeof sb === 'object' &&
+            Number.isFinite(sb.min) && Number.isFinite(sb.max) && sb.max >= sb.min) {
+            this._spawnY0 = sb.max;
+            this._spawnYSpan = sb.max - sb.min;
+        } else {
+            this._spawnY0 = -50;
+            this._spawnYSpan = 50;
+        }
+
+        // spawnMargin -> raw px inset, or null = DERIVE (the v1.3.0 wind-offset
+        // expression, preserved verbatim in spawn()). null is the ONLY value
+        // meaning "derive" -- same sentinel discipline as floorY. A finite
+        // spawnMargin >= 0 is used raw; non-finite or negative fails closed to
+        // null=derive. Coerce, not throw (decisions/0004 (g)).
+        const sm = cfg.spawnMargin;
+        this._spawnMargin = Number.isFinite(sm) && sm >= 0 ? sm : null;
 
         this.colorStr = typeof this.config.color === 'string' ? this.config.color : this._cssOklch(this.config.color);
 
@@ -244,9 +339,18 @@ export class SnowEngine {
         const raw = Math.floor(this._areaModifier * this.config.density * (dt * 60));
         const cap = Number.isFinite(raw) && raw > 0 ? (raw > this.max ? this.max : raw) : 0;
         if (cap <= 0) return;
-        const g = this.config.gravity;
-        let windOffset = g === 0 ? 0 : (h / g) * Math.abs(this.config.wind);
-        if (!Number.isFinite(windOffset)) windOffset = 0;
+        // Spawn inset (decisions/0004 (c')). _spawnMargin === null (default) means
+        // DERIVE: the v1.3.0 expression below runs VERBATIM, including the g === 0
+        // short-circuit and the finiteness guard. A resolved _spawnMargin is used
+        // raw. One branch per frame, zero per slot.
+        let windOffset;
+        if (this._spawnMargin === null) {
+            const g = this.config.gravity;
+            windOffset = g === 0 ? 0 : (h / g) * Math.abs(this.config.wind);
+            if (!Number.isFinite(windOffset)) windOffset = 0;
+        } else {
+            windOffset = this._spawnMargin;
+        }
 
         // Hoisted config/columns -- read once, not per slot.
         const rng = this.config.rng;
@@ -255,6 +359,10 @@ export class SnowEngine {
         const baseRadius = this.config.baseRadius;
         const driftAmplitude = this.config.driftAmplitude;
         const driftFreq = this.config.driftFreq;
+        // Spawn-band locals, hoisted (decisions/0004 (c)): default -50/50 =>
+        // y[i] = spawnY0 - rng()*spawnYSpan is byte-identical to v1.3.0's
+        // literal `-50 - rng()*50`.
+        const spawnY0 = this._spawnY0, spawnYSpan = this._spawnYSpan;
         const max = this.max;
         const state = this.state, x = this.x, y = this.y, z = this.z;
         const gz = this.gz, wz = this.wz, bucket = this.bucket, radius = this.radius;
@@ -282,7 +390,7 @@ export class SnowEngine {
             vy[i] = 0;
 
             x[i] = rng() * (w + windOffset * 2) - windOffset;
-            y[i] = -50 - rng() * 50;
+            y[i] = spawnY0 - rng() * spawnYSpan;
 
             z[i] = 0.2 + rng() * 0.8;
             const zi = z[i]; // the f32-rounded store, as the derived params read it
@@ -623,26 +731,89 @@ export class SnowEngine {
 }
 
 
+// Each preset is a COMPLETE 21-key scene (decisions/0004 (e)): all four name the
+// same keys in the same order, so { ...calm, ...heavy } equals heavy exactly
+// (completeness leaves no leftovers) and { ...anyPreset, reducedMotion: true }
+// equals calm on every field the digest sees (identical non-MOTION keys). Every
+// key a preset does not deliberately change is set to the CONSTRUCTOR DEFAULT
+// using the SAME CONSTANT the default uses (GUST_FREQ_DEF, PACK_DECAY_DEF, null),
+// so flurry/heavy/blizzard reproduce their committed v1.3.0 digests BY
+// CONSTRUCTION -- flurry's five values ARE the defaults, so its digest equals the
+// no-preset default. spawnBand is the null SENTINEL, never a nested object
+// (decisions/0004 (f)), so Object.isFrozen(preset) is true all the way down.
+// calm is Object.freeze({ ...CALM }) -- one source of truth with the reducedMotion
+// override (decisions/0004 (d) mechanic 5). Presets never name rng, color or
+// reducedMotion (injection/appearance/accessibility, not scene -- decisions/0004
+// (e)).
 export const SNOW_PRESETS = Object.freeze({
     flurry: Object.freeze({
-        density: 10.0,
-        wind: 30,
         gravity: 40,
+        wind: 30,
+        density: 10.0,
+        baseRadius: 2.5,
         driftAmplitude: 15,
-        baseRadius: 2.5
+        driftFreq: 1.0,
+        meltTimeMin: 2.0,
+        meltTimeMax: 5.0,
+        gust: 0,
+        gustFreq: GUST_FREQ_DEF,
+        turbulence: 0,
+        drag: 1,
+        spawnBand: null,
+        spawnMargin: null,
+        accumulate: false,
+        packResolution: 4,
+        maxPackWidth: 4096,
+        maxPackHeight: 200,
+        packDecay: PACK_DECAY_DEF,
+        floorY: null,
+        friction: 0
     }),
     heavy: Object.freeze({
-        density: 24.0,
-        wind: 150,
         gravity: 80,
+        wind: 150,
+        density: 24.0,
+        baseRadius: 3.5,
         driftAmplitude: 25,
-        baseRadius: 3.5
+        driftFreq: 1.0,
+        meltTimeMin: 2.0,
+        meltTimeMax: 5.0,
+        gust: 0,
+        gustFreq: GUST_FREQ_DEF,
+        turbulence: 0,
+        drag: 1,
+        spawnBand: null,
+        spawnMargin: null,
+        accumulate: false,
+        packResolution: 4,
+        maxPackWidth: 4096,
+        maxPackHeight: 200,
+        packDecay: PACK_DECAY_DEF,
+        floorY: null,
+        friction: 0
     }),
     blizzard: Object.freeze({
-        density: 40.0,
-        wind: 400,
         gravity: 250,
+        wind: 400,
+        density: 40.0,
+        baseRadius: 2.0, // Smaller flakes due to wind shear
         driftAmplitude: 50,
-        baseRadius: 2.0 // Smaller flakes due to wind shear
-    })
+        driftFreq: 1.0,
+        meltTimeMin: 2.0,
+        meltTimeMax: 5.0,
+        gust: 0,
+        gustFreq: GUST_FREQ_DEF,
+        turbulence: 0,
+        drag: 1,
+        spawnBand: null,
+        spawnMargin: null,
+        accumulate: false,
+        packResolution: 4,
+        maxPackWidth: 4096,
+        maxPackHeight: 200,
+        packDecay: PACK_DECAY_DEF,
+        floorY: null,
+        friction: 0
+    }),
+    calm: Object.freeze({ ...CALM })
 });

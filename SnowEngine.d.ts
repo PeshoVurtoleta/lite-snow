@@ -92,6 +92,41 @@ export interface SnowConfig {
      * (never anti-friction) and a non-finite value fails closed to 0. Default: 0
      */
     friction?: number;
+    /**
+     * Spawn Y band (S7). `{ min, max }` (both finite, `max >= min`) shapes where
+     * flakes enter, drawn as the SUBTRACTIVE `y = max - rng()*(max - min)` -- NOT
+     * the mirror `min + rng()*(max - min)`, which is a different per-draw value
+     * for the same rng and would break every determinism digest (see
+     * decisions/0004 (c)). `null` (the default), a non-object, a non-finite bound
+     * or `max < min` all fail closed to the literal default band `[-100, -50]`
+     * (byte-identical to v1.3.0). Coerces, never throws (it sizes no allocation).
+     * Default: null
+     */
+    spawnBand?: { min: number; max: number } | null;
+    /**
+     * Fixed horizontal spawn inset in px (S7). `null` (the default) DERIVES the
+     * v1.3.0 wind offset `(h / gravity) * |wind|` verbatim. A finite value `>= 0`
+     * is used raw; a non-finite or negative value fails closed to `null` = derive
+     * (the same sentinel discipline as floorY). Coerces, never throws.
+     * Default: null
+     */
+    spawnMargin?: number | null;
+    /**
+     * Reduced-motion accessibility flag (S7). A HARD OVERRIDE resolved ONCE at
+     * construction: strict `=== true` overwrites the twelve MOTION keys (gravity,
+     * wind, density, baseRadius, driftAmplitude, driftFreq, gust, gustFreq,
+     * turbulence, drag, spawnBand, spawnMargin) with the `calm` scene's values, so
+     * `{ ...SNOW_PRESETS.blizzard, reducedMotion: true }` equals calm exactly. The
+     * FLAG WINS over any explicit knob set alongside it (`{ reducedMotion: true,
+     * gust: 500 }` has gust 0). It resolves BEFORE baseRadius validation, so
+     * `{ baseRadius: 0, reducedMotion: true }` constructs (baseRadius becomes
+     * calm's 2.5) while `{ baseRadius: 0 }` throws (decisions/0004 (d), (d')). It
+     * is absent from both frame loops, so a runtime flip is inert. Non-MOTION keys
+     * (accumulate, pack*, floorY, friction, meltTime*) are NOT overridden. The
+     * engine does NO DOM access: read `prefers-reduced-motion` in your app and pass
+     * the flag. Default: false
+     */
+    reducedMotion?: boolean;
     /** Snow color as OKLCH object { l, c, h } or CSS string. Default: 'oklch(0.98 0.02 250)' */
     color?: { l: number; c: number; h: number } | string;
     /** Random number generator () => number [0, 1). Default: Math.random */
@@ -105,7 +140,13 @@ export declare class SnowEngine {
 
     /** Live falling-flake count (state === 1). O(1) telemetry getter. @readonly */
     readonly fallingCount: number;
-    /** Live melting-flake count (state === 2). O(1) telemetry getter. @readonly */
+    /**
+     * Live SETTLED/melting-flake count (state === 2). State 2 IS the settled
+     * state: a flake that has landed (on the floor, or on the pack when
+     * accumulate:true) and is now aging out -- so this IS the landed count. There
+     * is no separate landedCount getter (decisions/0003 (b), 0004 (a)). O(1)
+     * telemetry getter. @readonly
+     */
     readonly meltingCount: number;
     /** fallingCount + meltingCount. O(1) telemetry getter. @readonly */
     readonly activeCount: number;
@@ -146,6 +187,14 @@ export declare class SnowEngine {
     _areaModifier: number;
     /** Ring-cursor spawn probe position; wraps at max. @internal */
     _spawnCursor: number;
+    /** reducedMotion arm (config.reducedMotion === true), resolved once. @internal */
+    _reducedMotion: boolean;
+    /** Spawn band upper Y bound (default -50); `y = _spawnY0 - rng()*_spawnYSpan`. @internal */
+    _spawnY0: number;
+    /** Spawn band Y span (default 50); the SUBTRACTIVE rng term. @internal */
+    _spawnYSpan: number;
+    /** Resolved spawn inset px, or null = derive the wind offset in spawn(). @internal */
+    _spawnMargin: number | null;
     /** Render index bin for depth bucket 0 (near). Preallocated Uint32Array(max). @internal */
     _bin0: Uint32Array | null;
     /** Render index bin for depth bucket 1 (mid). Preallocated Uint32Array(max). @internal */
@@ -209,11 +258,19 @@ export declare class SnowEngine {
 /** Package version. Kept in sync with package.json and llms.txt. */
 export declare const VERSION: string;
 
+/**
+ * Four COMPLETE preset scenes. Each names all 21 scene keys (defaults included via
+ * the same constants the engine uses), so `{ ...calm, ...heavy }` equals heavy
+ * exactly. Presets never name rng, color or reducedMotion. Frozen, with no nested
+ * object (spawnBand is the null sentinel) -- decisions/0004 (e), (f).
+ */
 export declare const SNOW_PRESETS: {
-    /** Gentle snowfall. density: 10, wind: 30, gravity: 40 */
+    /** Gentle snowfall. density: 10, wind: 30, gravity: 40. Its values ARE the engine defaults. */
     flurry: SnowConfig;
     /** Dense snowfall. density: 24, wind: 150, gravity: 80 */
     heavy: SnowConfig;
     /** Extreme wind + density. density: 40, wind: 400, gravity: 250 */
     blizzard: SnowConfig;
+    /** Minimal motion. density: 4, wind: 8, gravity: 20, driftAmplitude: 4. The reducedMotion target. */
+    calm: SnowConfig;
 };

@@ -27,7 +27,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { SnowEngine } from '../../SnowEngine.js';
+import { SnowEngine, SNOW_PRESETS } from '../../SnowEngine.js';
 import { makeRng, makeMockCtx, CtxSeqRecorder, SOA_NAMES, SOA_NAMES_V111 } from './harness.mjs';
 
 /** The frozen v1.1.1 back-compat reproduction. Plain defaults, no knob set. */
@@ -107,6 +107,58 @@ export const ARMED_COUNTS = Object.freeze({
     gustTurb: Object.freeze({ falling: 1283, melting: 703 }),
     drag: Object.freeze({ falling: 1774, melting: 224 }),
 });
+
+/**
+ * S7 preset scenario (roadmap task 20). SAME (MAX, SEED, DT, W, H, FRAMES) as
+ * BASELINE above -- deliberately, so a flurry-built engine here (flurry's five
+ * non-default-looking values ARE the constructor defaults, decisions/0004 (e))
+ * reproduces BASELINE_DIGEST too when digested over SOA_NAMES_V111, which is
+ * the non-tautology proof T12 pins alongside PRESET_DIGESTS.flurry (taken over
+ * the full 14-name SOA_NAMES).
+ */
+export const PRESET_SCENARIO = Object.freeze({
+    MAX: 2000,
+    SEED: 0x5EED1234,
+    DT: 1 / 60,
+    W: 1280,
+    H: 720,
+    FRAMES: 3000,
+});
+
+/**
+ * Committed sha256 hex digests (over SOA_NAMES, all fourteen columns) for each
+ * of the four SNOW_PRESETS members, taken over PRESET_SCENARIO. flurry/heavy/
+ * blizzard reproduce the v1.3.0 pre-S7 values UNCHANGED -- S7 adds no physics,
+ * so a preset extended to 21 keys with every new key at its default value must
+ * still land on the same bytes. calm is the newly captured S7 digest. Fixed
+ * constants, never derived-and-compared-to-itself in T12.
+ */
+export const PRESET_DIGESTS = Object.freeze({
+    flurry: '8d2743cb7995c38400ac76af1eb80bf54d598daacac6dda1bafe847fe2157f6d',
+    heavy: 'cfb49aa250bb9325df3d2ed2a12a854ecdc34c0d895b6ca27d5f307baa786ca0',
+    blizzard: 'd0380b97ac52dc826743a559c38012a04fc58c6dafd52a2a14888e9095bfc549',
+    calm: '90daee2fa9428ea8d1d3b8d28360f5bc8a5d7953416b85c5c06f17c23f9e9274',
+});
+
+/** Committed falling/melting counts at the end of PRESET_SCENARIO, per preset. */
+export const PRESET_COUNTS = Object.freeze({
+    flurry: Object.freeze({ falling: 1879, melting: 119 }),
+    heavy: Object.freeze({ falling: 1912, melting: 82 }),
+    blizzard: Object.freeze({ falling: 1632, melting: 352 }),
+    calm: Object.freeze({ falling: 1881, melting: 118 }),
+});
+
+/** Builds (but does not run) the engine for the named SNOW_PRESETS member. */
+export function buildPresetEngine(name) {
+    const preset = SNOW_PRESETS[name];
+    if (preset === undefined) throw new Error('armed-scenario: unknown preset ' + name);
+    return new SnowEngine(PRESET_SCENARIO.MAX, { rng: makeRng(PRESET_SCENARIO.SEED), ...preset });
+}
+
+/** Runs the named preset for PRESET_SCENARIO.FRAMES cycles to completion. */
+export function runPreset(name) {
+    return drive(buildPresetEngine(name), PRESET_SCENARIO.DT, PRESET_SCENARIO.W, PRESET_SCENARIO.H, PRESET_SCENARIO.FRAMES);
+}
 
 /** Builds (but does not run) the engine for the frozen v1.1.1 baseline. */
 export function buildBaselineEngine() {

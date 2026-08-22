@@ -41,6 +41,7 @@ import { run as t8 } from './torture/t8-cross.mjs';
 import { run as t9 } from './torture/t9-controls.mjs';
 import { run as t10 } from './torture/t10-armed.mjs';
 import { run as t11 } from './torture/t11-pack.mjs';
+import { run as t12 } from './torture/t12-presets.mjs';
 
 const TIERS = [
     ['T0 laws', t0],
@@ -55,6 +56,7 @@ const TIERS = [
     ['T9 controls', t9],
     ['T10 armed', t10],
     ['T11 pack', t11],
+    ['T12 presets', t12],
 ];
 
 function main() {

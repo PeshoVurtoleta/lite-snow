@@ -155,9 +155,39 @@ describe('SnowEngine', () => {
     });
 });
 
+// S7 preset expectations. GUST_FREQ_DEF/PACK_DECAY_DEF are recomputed the SAME
+// way the engine computes them, so deepEqual compares the identical f64 -- a
+// hand-typed 2.0944 would (correctly) fail. The 21-key set is the complete scene
+// contract (decisions/0004 (e)); rng/color/reducedMotion are excluded.
+const TAU_T = Math.PI * 2;
+const GUST_FREQ_DEF_T = TAU_T / 3;
+const PACK_DECAY_DEF_T = 2.0;
+const PRESET_KEYS = [
+    'gravity', 'wind', 'density', 'baseRadius', 'driftAmplitude', 'driftFreq',
+    'meltTimeMin', 'meltTimeMax', 'gust', 'gustFreq', 'turbulence', 'drag',
+    'spawnBand', 'spawnMargin', 'accumulate', 'packResolution', 'maxPackWidth',
+    'maxPackHeight', 'packDecay', 'floorY', 'friction',
+];
+function completeScene(overrides) {
+    return {
+        gravity: 40, wind: 30, density: 10.0, baseRadius: 2.5, driftAmplitude: 15,
+        driftFreq: 1.0, meltTimeMin: 2.0, meltTimeMax: 5.0,
+        gust: 0, gustFreq: GUST_FREQ_DEF_T, turbulence: 0, drag: 1,
+        spawnBand: null, spawnMargin: null, accumulate: false,
+        packResolution: 4, maxPackWidth: 4096, maxPackHeight: 200,
+        packDecay: PACK_DECAY_DEF_T, floorY: null, friction: 0,
+        ...overrides,
+    };
+}
+const EXPECT_FLURRY = completeScene({});
+const EXPECT_HEAVY = completeScene({ gravity: 80, wind: 150, density: 24.0, baseRadius: 3.5, driftAmplitude: 25 });
+const EXPECT_BLIZZARD = completeScene({ gravity: 250, wind: 400, density: 40.0, baseRadius: 2.0, driftAmplitude: 50 });
+const EXPECT_CALM = completeScene({ gravity: 20, wind: 8, density: 4, baseRadius: 2.5, driftAmplitude: 4 });
+
 describe('SNOW_PRESETS', () => {
-    test('has 3 presets', () => {
-        assert.equal(Object.keys(SNOW_PRESETS).length, 3);
+    test('has 4 presets', () => {
+        assert.equal(Object.keys(SNOW_PRESETS).length, 4);
+        assert.deepEqual(Object.keys(SNOW_PRESETS).sort(), ['blizzard', 'calm', 'flurry', 'heavy']);
     });
 
     test('flurry has low density', () => {
@@ -168,10 +198,53 @@ describe('SNOW_PRESETS', () => {
         assert.equal(SNOW_PRESETS.blizzard.wind, 400);
     });
 
+    test('calm is the minimal-motion scene', () => {
+        assert.equal(SNOW_PRESETS.calm.density, 4);
+        assert.equal(SNOW_PRESETS.calm.wind, 8);
+        assert.equal(SNOW_PRESETS.calm.gravity, 20);
+        assert.equal(SNOW_PRESETS.calm.driftAmplitude, 4);
+    });
+
     test('presets work as constructor config', () => {
         const e = new SnowEngine(1000, SNOW_PRESETS.heavy);
         assert.equal(e.config.density, 24.0);
         assert.equal(e.config.wind, 150);
+    });
+
+    test('every preset is a COMPLETE 21-key scene, exactly these keys (decisions/0004 (e))', () => {
+        for (const name of ['flurry', 'heavy', 'blizzard', 'calm']) {
+            assert.deepEqual(Object.keys(SNOW_PRESETS[name]).sort(), [...PRESET_KEYS].sort(),
+                name + ' must name exactly the 21 scene keys');
+            // never rng/color/reducedMotion -- injection/appearance/accessibility
+            assert.ok(!('rng' in SNOW_PRESETS[name]), name + ' must not name rng');
+            assert.ok(!('color' in SNOW_PRESETS[name]), name + ' must not name color');
+            assert.ok(!('reducedMotion' in SNOW_PRESETS[name]), name + ' must not name reducedMotion');
+        }
+    });
+
+    test('A2: flurry IS the default scene (non-tautology companion to the digest)', () => {
+        // flurry's digest EQUALS the {}-built default, so a hash match cannot
+        // distinguish them. Prove the claim directly: a flurry-built engine's
+        // config equals a {}-built engine's config on all 21 keys.
+        const fl = new SnowEngine(100, SNOW_PRESETS.flurry);
+        const df = new SnowEngine(100, {});
+        for (const k of PRESET_KEYS) {
+            assert.deepEqual(fl.config[k], df.config[k], 'flurry vs default differ on ' + k);
+        }
+        assert.deepEqual(SNOW_PRESETS.flurry, EXPECT_FLURRY);
+    });
+
+    test('A14: completeness composes -- { ...calm, ...heavy } deep-equals heavy on all 21 keys', () => {
+        const spread = { ...SNOW_PRESETS.calm, ...SNOW_PRESETS.heavy };
+        for (const k of PRESET_KEYS) {
+            assert.deepEqual(spread[k], SNOW_PRESETS.heavy[k], 'leftover on ' + k);
+        }
+    });
+
+    test('A14: a user key spread AFTER a preset wins ({ ...heavy, accumulate: true })', () => {
+        const e = new SnowEngine(100, { ...SNOW_PRESETS.heavy, accumulate: true });
+        assert.equal(e.config.accumulate, true);
+        assert.notEqual(e.pack, null, 'accumulate:true must build the pack even from a complete preset');
     });
 });
 
@@ -184,7 +257,7 @@ describe('boundary', () => {
     test('VERSION is exported and agrees with package.json (three-place sync)', () => {
         const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
         assert.equal(typeof VERSION, 'string');
-        assert.equal(VERSION, '1.3.0');
+        assert.equal(VERSION, '1.4.0');
         assert.equal(VERSION, pkg.version, 'VERSION const and package.json disagree');
     });
 
@@ -235,13 +308,11 @@ describe('boundary', () => {
         assert.equal(e.state, null, 'destroy() should leave the SoA columns released');
     });
 
-    test('preset fields are exactly the documented values', () => {
-        assert.deepEqual(SNOW_PRESETS.flurry,
-            { density: 10.0, wind: 30, gravity: 40, driftAmplitude: 15, baseRadius: 2.5 });
-        assert.deepEqual(SNOW_PRESETS.heavy,
-            { density: 24.0, wind: 150, gravity: 80, driftAmplitude: 25, baseRadius: 3.5 });
-        assert.deepEqual(SNOW_PRESETS.blizzard,
-            { density: 40.0, wind: 400, gravity: 250, driftAmplitude: 50, baseRadius: 2.0 });
+    test('preset fields are exactly the documented COMPLETE 21-key values', () => {
+        assert.deepEqual(SNOW_PRESETS.flurry, EXPECT_FLURRY);
+        assert.deepEqual(SNOW_PRESETS.heavy, EXPECT_HEAVY);
+        assert.deepEqual(SNOW_PRESETS.blizzard, EXPECT_BLIZZARD);
+        assert.deepEqual(SNOW_PRESETS.calm, EXPECT_CALM);
     });
 });
 
@@ -497,12 +568,25 @@ describe('S2 constructor, freeze, lifecycle, telemetry', () => {
         assert.doesNotThrow(() => new SnowEngine(100, { baseRadius: 0.1 }));
     });
 
-    test('SNOW_PRESETS and every preset member are frozen', () => {
+    test('A13: SNOW_PRESETS and every preset member are frozen, no nested object', () => {
         assert.ok(Object.isFrozen(SNOW_PRESETS), 'the table must be frozen');
-        assert.ok(Object.isFrozen(SNOW_PRESETS.flurry), 'flurry must be frozen');
-        assert.ok(Object.isFrozen(SNOW_PRESETS.heavy), 'heavy must be frozen');
-        assert.ok(Object.isFrozen(SNOW_PRESETS.blizzard), 'blizzard must be frozen');
+        for (const name of ['flurry', 'heavy', 'blizzard', 'calm']) {
+            assert.ok(Object.isFrozen(SNOW_PRESETS[name]), name + ' must be frozen');
+            // spawnBand is the null sentinel in every preset, never a nested
+            // object -- so Object.isFrozen is not a lie about an interior.
+            assert.equal(SNOW_PRESETS[name].spawnBand, null, name + ' spawnBand must be the null sentinel');
+        }
         assert.throws(() => { SNOW_PRESETS.flurry.density = 999; }, TypeError);
+        assert.throws(() => { SNOW_PRESETS.calm.density = 999; }, TypeError);
+    });
+
+    test('A13: a preset spread into two engines (one reducedMotion) is not mutated', () => {
+        // The override writes to this.config (a fresh spread), never to the
+        // source. Object.assign(config, CALM) would mutate heavy and turn this red.
+        const before = JSON.stringify(SNOW_PRESETS.heavy);
+        new SnowEngine(100, SNOW_PRESETS.heavy);
+        new SnowEngine(100, { ...SNOW_PRESETS.heavy, reducedMotion: true });
+        assert.equal(JSON.stringify(SNOW_PRESETS.heavy), before, 'SNOW_PRESETS.heavy was mutated');
     });
 
     test('clear() is a full reset: a cleared engine reproduces a fresh one bit-for-bit', () => {
@@ -740,5 +824,126 @@ describe('S6 accumulation and friction config surface', () => {
         assert.equal(e._packTruncated, 0);
         assert.equal(e._packSkipped, 0);
         assert.equal(e._packActive, 0);
+    });
+});
+
+/**
+ * S7 presets, reduced motion, spawn shaping (QA config-surface tier). The
+ * cross-process determinism digests, the monotonic calmness metric and the
+ * gust-guard counting shim live in the torture suite (t12); these pin the
+ * construction-time config surface and the fail-closed matrices directly.
+ */
+describe('S7 presets, reduced motion, spawn shaping', () => {
+    const REDUCED_KEYS = [
+        'gravity', 'wind', 'density', 'baseRadius', 'driftAmplitude', 'driftFreq',
+        'meltTimeMin', 'meltTimeMax', 'gust', 'gustFreq', 'turbulence', 'drag',
+        'spawnBand', 'spawnMargin', 'accumulate', 'packResolution', 'maxPackWidth',
+        'maxPackHeight', 'packDecay', 'floorY', 'friction',
+    ];
+
+    test('A5: reducedMotion is a HARD OVERRIDE -- { ...blizzard, reducedMotion:true } equals calm on all 21 keys', () => {
+        const r = new SnowEngine(100, { ...SNOW_PRESETS.blizzard, reducedMotion: true });
+        const c = new SnowEngine(100, SNOW_PRESETS.calm);
+        for (const k of REDUCED_KEYS) {
+            assert.deepEqual(r.config[k], c.config[k], 'reducedMotion blizzard diverges from calm on ' + k);
+        }
+        assert.equal(r._reducedMotion, true);
+    });
+
+    test('A5: { ...calm, reducedMotion:true } is idempotent', () => {
+        const r = new SnowEngine(100, { ...SNOW_PRESETS.calm, reducedMotion: true });
+        const c = new SnowEngine(100, SNOW_PRESETS.calm);
+        for (const k of REDUCED_KEYS) assert.deepEqual(r.config[k], c.config[k], 'diverges on ' + k);
+    });
+
+    test('A6: the flag WINS over an explicit knob -- { reducedMotion:true, gust:500 } has gust 0', () => {
+        const e = new SnowEngine(100, { reducedMotion: true, gust: 500 });
+        assert.equal(e.config.gust, 0, 'the explicit gust must be discarded, not blended');
+        // and the reverse: without the flag the user's 500 survives
+        const e2 = new SnowEngine(100, { gust: 500 });
+        assert.equal(e2.config.gust, 500);
+    });
+
+    test('A7: reducedMotion arms STRICTLY on === true -- truthy non-true does not arm it', () => {
+        for (const v of ['yes', 1, {}, [], 'true']) {
+            const e = new SnowEngine(100, { reducedMotion: v, gravity: 999 });
+            assert.equal(e._reducedMotion, false, 'reducedMotion=' + String(v) + ' must NOT arm');
+            assert.equal(e.config.gravity, 999, 'a non-arming flag must leave motion knobs untouched');
+        }
+    });
+
+    test('A7: a runtime flip of config.reducedMotion is inert (resolved once at construction)', () => {
+        const e = new SnowEngine(100, { gravity: 999, gust: 500 });
+        e.config.reducedMotion = true; // mid-run flip
+        assert.equal(e.config.gravity, 999, 'a runtime flip must not rewrite motion knobs');
+        assert.equal(e.config.gust, 500);
+        assert.equal(e._reducedMotion, false);
+    });
+
+    test('AD-2: reducedMotion resolves BEFORE baseRadius validation (deliberate asymmetry)', () => {
+        // { baseRadius: 0 } throws; { baseRadius: 0, reducedMotion: true } constructs.
+        assert.throws(() => new SnowEngine(100, { baseRadius: 0 }), RangeError);
+        assert.throws(() => new SnowEngine(100, { baseRadius: 'big' }), RangeError);
+        const a = new SnowEngine(100, { baseRadius: 0, reducedMotion: true });
+        assert.equal(a.config.baseRadius, 2.5, 'baseRadius becomes calm 2.5 under the flag');
+        const b = new SnowEngine(100, { baseRadius: 'big', reducedMotion: true });
+        assert.equal(b.config.baseRadius, 2.5);
+    });
+
+    test('A3/A13: spawnBand fails closed to the default -50/50 band (subtractive form preserved)', () => {
+        const def = new SnowEngine(100, {});
+        assert.equal(def._spawnY0, -50);
+        assert.equal(def._spawnYSpan, 50);
+        // { min:-100, max:-50 } is the SAME two locals as the default (byte-identity)
+        const same = new SnowEngine(100, { spawnBand: { min: -100, max: -50 } });
+        assert.equal(same._spawnY0, -50);
+        assert.equal(same._spawnYSpan, 50);
+        // fail-closed inputs all land on the literal default band
+        for (const bad of [null, 'x', 42, {}, { min: 5, max: 1 }, { min: NaN, max: -50 }, { min: -100, max: Infinity }]) {
+            const e = new SnowEngine(100, { spawnBand: bad });
+            assert.equal(e._spawnY0, -50, 'bad spawnBand ' + JSON.stringify(bad) + ' Y0');
+            assert.equal(e._spawnYSpan, 50, 'bad spawnBand ' + JSON.stringify(bad) + ' span');
+        }
+    });
+
+    test('A4: a NON-default band actually moves the sim -- spawned y lies in (min, max]', () => {
+        const e = new SnowEngine(500, { density: 300, spawnBand: { min: -400, max: -300 } });
+        assert.equal(e._spawnY0, -300);
+        assert.equal(e._spawnYSpan, 100);
+        e.spawn(0.016, 800, 600);
+        let checked = 0;
+        for (let i = 0; i < 500; i++) {
+            if (e.state[i] !== 1) continue;
+            assert.ok(e.y[i] > -400 && e.y[i] <= -300, 'slot ' + i + ' y=' + e.y[i] + ' out of band');
+            checked++;
+        }
+        assert.ok(checked > 0, 'no live slots checked -- test would be vacuous');
+    });
+
+    test('spawnMargin: finite >= 0 used raw, non-finite/negative -> null=derive', () => {
+        assert.equal(new SnowEngine(100, {})._spawnMargin, null);
+        assert.equal(new SnowEngine(100, { spawnMargin: 0 })._spawnMargin, 0);
+        assert.equal(new SnowEngine(100, { spawnMargin: 123 })._spawnMargin, 123);
+        for (const bad of [-5, NaN, Infinity, null, 'x', undefined]) {
+            assert.equal(new SnowEngine(100, { spawnMargin: bad })._spawnMargin, null,
+                'bad spawnMargin ' + String(bad) + ' must derive');
+        }
+    });
+
+    test('spawnMargin: a fixed 0 inset keeps spawned x inside [0, w) (derivation overridden)', () => {
+        const e = new SnowEngine(500, { density: 300, wind: 400, spawnMargin: 0 });
+        e.spawn(0.016, 800, 600);
+        let checked = 0;
+        for (let i = 0; i < 500; i++) {
+            if (e.state[i] !== 1) continue;
+            assert.ok(e.x[i] >= 0 && e.x[i] < 800, 'slot ' + i + ' x=' + e.x[i] + ' outside [0,800)');
+            checked++;
+        }
+        assert.ok(checked > 0, 'no live slots checked');
+    });
+
+    test('A13: no landedCount getter -- meltingCount IS the landed count (decisions/0003 (b), 0004 (a))', () => {
+        assert.equal('landedCount' in SnowEngine.prototype, false, 'landedCount must not exist');
+        assert.equal(typeof Object.getOwnPropertyDescriptor(SnowEngine.prototype, 'meltingCount').get, 'function');
     });
 });

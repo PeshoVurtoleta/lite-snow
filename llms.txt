@@ -1,6 +1,6 @@
 # @zakkster/lite-snow
 
-> Zero-GC SoA environmental snow engine. Drift physics, living-air forces (gust, turbulence, drag), persistent-pack accumulation, friction, Z-depth parallax, bucketed rendering. Zero dependencies.
+> Zero-GC SoA environmental snow engine. Drift physics, living-air forces (gust, turbulence, drag), persistent-pack accumulation, friction, Z-depth parallax, bucketed rendering, 4 complete presets, reduced-motion + spawn shaping. Zero dependencies.
 
 ## Install
 npm i @zakkster/lite-snow
@@ -25,7 +25,10 @@ import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 - Dimension cache: _areaModifier recomputed only on canvas size change
 - Off-screen culling: X +/- 200px and Y < -200 (wind + negative gravity leak)
 - Responsive density: spawn count scales with canvas area
-- 3 presets: SNOW_PRESETS.flurry, .heavy, .blizzard
+- 4 presets: SNOW_PRESETS.flurry, .heavy, .blizzard, .calm -- each a COMPLETE 21-key scene (every scene knob named, defaults included via the same constants), so { ...calm, ...heavy } equals heavy exactly. Presets do NOT name rng, color or reducedMotion (injection/appearance/accessibility, not scene). flurry's values ARE the engine defaults, so its digest equals the no-preset default
+- reducedMotion (S7): a HARD OVERRIDE. reducedMotion:true overwrites the twelve MOTION keys (gravity, wind, density, baseRadius, driftAmplitude, driftFreq, gust, gustFreq, turbulence, drag, spawnBand, spawnMargin) with calm's values -- the flag WINS over any explicit knob set alongside it ({ ...blizzard, reducedMotion:true } equals calm; { reducedMotion:true, gust:500 } has gust 0). Strict === true arms it; resolved ONCE at construction, absent from both frame loops, so a runtime flip is inert. Non-MOTION keys (accumulate, pack*, floorY, friction, meltTime*) are NOT overridden -- accumulation is a pile, not motion
+- spawnBand (S7, default null): { min, max } shapes the spawn Y band as the SUBTRACTIVE draw y = max - rng()*(max-min); the mirror min + rng()*(max-min) is a different per-draw value and is NOT used. null/garbage/non-finite bound/max<min fails closed to the literal -50/-100 default band (byte-identical to v1.3.0). spawnMargin (S7, default null): a fixed spawn inset in px; null = DERIVE the v1.3.0 wind-offset (h/gravity)*|wind|. Both COERCE (they size no allocation), unlike packResolution/maxPackWidth/maxPackHeight which THROW (they size the Uint16 pack)
+- meltingCount is the LANDED count: state 2 IS the SETTLED state -- a flake that has landed (on the floor, or on the pack when accumulate:true) and is now aging out. There is no separate landedCount getter (decisions/0003 (b), 0004 (a))
 - No clearRect -- snow is overlay. Caller clears.
 - spawn() and updateAndDraw() separate -- caller controls timing
 - Pre-parsed OKLCH color in constructor
@@ -41,10 +44,10 @@ import { SnowEngine, SNOW_PRESETS } from '@zakkster/lite-snow';
 - clear() is a full reset: pool, clock, dimension cache and telemetry counters
 - updateAndDraw ctx door: a null ctx or one missing arc()/ellipse() is a no-op frame
 - A draw call that throws mid-render restores globalAlpha to 1.0 and RETHROWS
-- SNOW_PRESETS and each of .flurry/.heavy/.blizzard are Object.frozen
+- SNOW_PRESETS and each of .flurry/.heavy/.blizzard/.calm are Object.frozen; no preset holds a nested object (spawnBand is the null sentinel), so Object.isFrozen is true all the way down
 
 ## API
-- VERSION: '1.3.0'
+- VERSION: '1.4.0'
 - new SnowEngine(maxParticles?, config?)
 - .spawn(dt, w, h) -- spawn new flakes
 - .updateAndDraw(ctx, dt, w, h) -- physics + render
@@ -58,18 +61,28 @@ driftFreq (1.0), meltTimeMin (2.0), meltTimeMax (5.0),
 gust (0), gustFreq (TAU/3), turbulence (0), drag (1 = off),
 accumulate (false), packResolution (4), maxPackWidth (4096), maxPackHeight (200),
 packDecay (2.0 units/s), floorY (null = track h), friction (0),
+spawnBand (null), spawnMargin (null), reducedMotion (false),
 color ('oklch(0.98 0.02 250)'), rng (Math.random)
 Each living-air knob fails closed: a non-finite value (incl. null) lands on its default, not on 0.
 gustFreq 0 with gust armed is a stated no-op: sin(0)*gust freezes the gust off (0 Hz = no oscillation).
 accumulate is construction-time only (strict === true arms it); a runtime flip is inert. When armed, packResolution [1..256], maxPackWidth [packResolution..16384] and maxPackHeight [1..65535] must be integers or the constructor throws RangeError naming the value. floorY: non-finite -> null. friction: clamped [0,1], negative -> 0. packDecay: non-finite -> default 2.0, negative -> 0.
+spawnBand: { min, max } both finite and max >= min shapes the spawn band (subtractive form); null (default), non-object, non-finite bound or max < min fails closed to the -50/-100 default band. spawnMargin: finite >= 0 used raw as the spawn inset; non-finite or negative -> null = derive. reducedMotion: strict === true is a hard override resolved once at construction (the flag wins, motion keys become calm's); it resolves BEFORE baseRadius validation, so { baseRadius: 0, reducedMotion: true } constructs (baseRadius becomes calm's 2.5) while { baseRadius: 0 } throws.
 
 ## Presets
-SNOW_PRESETS.flurry -- gentle
+SNOW_PRESETS.flurry -- gentle (its values ARE the engine defaults)
 SNOW_PRESETS.heavy -- dense, windy
 SNOW_PRESETS.blizzard -- extreme wind + density
+SNOW_PRESETS.calm -- minimal motion (density 4, wind 8, gravity 20, driftAmplitude 4); the reducedMotion target
+Each preset is COMPLETE (all 21 scene keys). Excluded: rng, color, reducedMotion.
 
 ## Game Loop
 snow.spawn(dt, w, h);
 ctx.clearRect(0, 0, w, h);       // caller clears
 drawScene();                       // caller scene
 snow.updateAndDraw(ctx, dt, w, h); // snow overlays
+
+## Reduced Motion (app-layer wiring)
+The engine does NO DOM access -- read the media query in your app and pass the flag:
+const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+const snow = new SnowEngine(2000, { ...SNOW_PRESETS.blizzard, reducedMotion: reduce });
+// reducedMotion:true forces the calm scene (hard override); false leaves the preset intact.

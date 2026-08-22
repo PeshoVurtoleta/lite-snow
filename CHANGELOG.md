@@ -3,6 +3,78 @@
 All notable changes to `@zakkster/lite-snow` are documented here. The format
 follows Keep a Changelog, and the project adheres to Semantic Versioning.
 
+## [1.4.0] - 2026-08-22
+
+Session S7. Presets, reduced motion, spawn shaping. A fourth preset (`calm`), all
+four presets extended to **complete 21-key scenes**, an accessibility
+`reducedMotion` hard override, and two spawn-shaping knobs (`spawnBand`,
+`spawnMargin`). S7 adds NO physics: both frame loops in `updateAndDraw` are
+BYTE-IDENTICAL to 1.3.0 (a hand-reviewed `git diff`: the diff hunks skip from the
+single changed `y[i]` line straight past the end of `updateAndDraw`, so the whole
+method -- physics loop, decay loop and render section -- shows ZERO changed lines).
+The only per-slot line changed in the entire package is
+`spawn()`'s `y[i]`, which now reads two hoisted locals whose defaults are the
+literal `-50`/`50` constants -- same operator, same operands, so every committed
+determinism digest survives BY CONSTRUCTION. See
+`decisions/0004-presets-reduced-motion.md`.
+
+### Added
+
+- **`SNOW_PRESETS.calm`** -- a minimal-motion scene (density 4, wind 8, gravity
+  20, driftAmplitude 4). Measurably calmer per-particle than `flurry` on the
+  monotonic mean-|dx|/|dy| metric. It is the `reducedMotion` target.
+- **Complete presets.** `flurry`, `heavy` and `blizzard` now name all 21 scene
+  keys (every default filled via the SAME constant the engine uses), so
+  `{ ...calm, ...heavy }` equals `heavy` exactly. `flurry`'s values ARE the engine
+  defaults, so its digest equals the no-preset default. Presets never name `rng`,
+  `color` or `reducedMotion` (injection/appearance/accessibility, not scene). No
+  preset holds a nested object -- `spawnBand` is the `null` sentinel -- so
+  `Object.isFrozen` is true all the way down.
+- **`reducedMotion` (default false)** -- a HARD OVERRIDE resolved ONCE at
+  construction (strict `=== true`): the flag WINS, overwriting the twelve MOTION
+  keys with `calm`'s values, so `{ ...SNOW_PRESETS.blizzard, reducedMotion: true }`
+  equals `calm` exactly and `{ reducedMotion: true, gust: 500 }` has `gust` 0. It
+  resolves BEFORE `baseRadius` validation, so `{ baseRadius: 0, reducedMotion:
+  true }` constructs (baseRadius becomes calm's 2.5) while `{ baseRadius: 0 }`
+  throws. Absent from both frame loops -- a runtime flip is inert. The engine does
+  NO DOM access; read `prefers-reduced-motion` in your app and pass the flag.
+- **`spawnBand` (default null)** -- `{ min, max }` shapes the spawn Y band as the
+  SUBTRACTIVE draw `y = max - rng()*(max - min)`. The mirror
+  `min + rng()*(max - min)` is a different per-draw value and is NOT used.
+  `null`/non-object/non-finite bound/`max < min` fails closed to the literal
+  default band `[-100, -50]` (byte-identical to 1.3.0).
+- **`spawnMargin` (default null)** -- a fixed spawn inset in px; `null` DERIVES the
+  1.3.0 wind offset `(h/gravity)*|wind|` verbatim. Finite `>= 0` used raw;
+  non-finite or negative fails closed to `null` = derive.
+
+### Design
+
+- **The throw-vs-coerce rule, now stated.** A parameter that SIZES AN ALLOCATION
+  throws (`packResolution`/`maxPackWidth`/`maxPackHeight` -- they fix a `Uint16Array`
+  length); a parameter that only SHAPES BEHAVIOUR coerces to its default
+  (`spawnBand`/`spawnMargin`/`floorY`/`friction`/`gust`/`drag`).
+- **`meltingCount` is the landed count.** State 2 IS the settled state.
+- **DOM-freedom proven by RUNTIME, not grep.** A substring grep goes red on the
+  correct engine ("documented", "narrower window"); QA's proof poisons every DOM
+  global and runs 200 frames.
+
+### Not added
+
+- **No `landedCount` getter.** `meltingCount` already answers it -- state 2 IS the
+  settled state. `decisions/0003 (b)` rejected it in S6 and named S7 by name; the
+  1.4.0 brief's request is declined and pinned by an anti-drift guard.
+- **No `settle` knob.** It never shipped -- snow has no bounce, so a rest threshold
+  gates on a value that is always terminal velocity (`decisions/0003`).
+
+### Unchanged
+
+- **Both frame loops are byte-identical to 1.3.0.** `updateAndDraw`'s physics
+  loop, pack-decay loop and render section show zero changed lines. The committed
+  `BASELINE_DIGEST` (`f2e3ccef...ef15`), all five `ARMED_DIGESTS`,
+  `CTX_SEQ_DIGEST_DEFAULT` and `PACK_DIGEST` all reproduce. `{ spawnBand: { min:
+  -100, max: -50 } }` reproduces `BASELINE_DIGEST` bit-for-bit (the mirror-trap
+  proof).
+
 ## [1.3.0] - 2026-08-21
 
 Session S6. Accumulation and friction. `accumulate: true` builds a persistent
@@ -549,6 +621,7 @@ non-fatal known-issue reproductions so they are visible on every run.
   Repro: `e.spawn(0.016,800,600); e.updateAndDraw(ctx,-1,800,600)` ->
   `e._elapsedTime` is negative and the live count drops.
 
+[1.4.0]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.4.0
 [1.3.0]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.3.0
 [1.2.0]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.2.0
 [1.1.1]: https://github.com/PeshoVurtoleta/lite-snow/releases/tag/v1.1.1

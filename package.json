@@ -1,7 +1,7 @@
 {
   "name": "@zakkster/lite-snow",
   "author": "Zahary Shinikchiev <shinikchiev@yahoo.com>",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Zero-GC, SoA environmental snow engine with drift physics, Z-depth parallax, persistent-pack accumulation, dimension caching, and off-screen culling. Designed for cinematic snowfall with high-performance rendering and natural flake behavior.",
   "type": "module",
   "main": "./SnowEngine.js",
